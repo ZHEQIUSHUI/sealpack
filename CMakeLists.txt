@@ -23,15 +23,15 @@ add_library(sealpack STATIC
     src/capi.cpp
 )
 target_include_directories(sealpack
-    PUBLIC  ${CMAKE_SOURCE_DIR}/include
-    PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(sealpack PRIVATE monocypher)
 target_compile_options(sealpack PRIVATE -Wall -Wextra)
 
 # ---- CLI (with the `web` file-manager UI) -----------------------------------
 add_executable(sealpack-cli cli/main.cpp cli/web.cpp)
 target_link_libraries(sealpack-cli PRIVATE sealpack)
-target_include_directories(sealpack-cli PRIVATE ${CMAKE_SOURCE_DIR}/third_party/httplib)
+target_include_directories(sealpack-cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/httplib)
 find_package(Threads REQUIRED)
 target_link_libraries(sealpack-cli PRIVATE Threads::Threads)
 set_target_properties(sealpack-cli PROPERTIES OUTPUT_NAME sealpack)
@@ -52,7 +52,7 @@ if(SEALPACK_BUILD_TESTS)
     foreach(t ${SEALPACK_TESTS})
         add_executable(test_${t} tests/test_${t}.cpp)
         target_link_libraries(test_${t} PRIVATE sealpack monocypher)
-        target_include_directories(test_${t} PRIVATE ${CMAKE_SOURCE_DIR}/src)
+        target_include_directories(test_${t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
         add_test(NAME ${t} COMMAND test_${t})
     endforeach()
 
