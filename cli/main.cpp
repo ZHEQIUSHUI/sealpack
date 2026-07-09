@@ -15,7 +15,7 @@
 // prompts for the password; with no terminal it reads $SEALPACK_PASSWORD (CI).
 //
 //   sealpack create <pack>                 (prompts for a new password twice)
-//   sealpack ls/add/get/rm/mv/cp/stat/compact/keys/rekey/addkey/rmkey <pack> ...
+//   sealpack ls/add/get/rm/mv/cp/stat/compact/rekey <pack> ...
 //   sealpack web    <pack> [port]
 
 #include <cstdio>
@@ -151,32 +151,12 @@ static int do_command(Pack* pk, const std::vector<std::string>& a) {
         std::fprintf(stderr, "compacted\n");
         return 0;
     }
-    if (c == "keys" && a.size() == 1) {
-        std::printf("%d key slot(s) in use; this session opened slot %d\n", pk->num_keys(), pk->opened_slot());
-        return 0;
-    }
     if (c == "rekey" && a.size() == 1) {
         const std::string n1 = read_password("new password: ");
         const std::string n2 = read_password("confirm new password: ");
         if (n1 != n2) { std::fprintf(stderr, "new passwords don't match\n"); return 1; }
         if (!pk->rekey(n1)) { std::fprintf(stderr, "rekey failed\n"); return 1; }
-        std::fprintf(stderr, "password changed (slot %d); the old one no longer opens this pack\n", pk->opened_slot());
-        return 0;
-    }
-    if (c == "addkey" && a.size() == 1) {
-        const std::string n1 = read_password("new password: ");
-        const std::string n2 = read_password("confirm new password: ");
-        if (n1 != n2) { std::fprintf(stderr, "passwords don't match\n"); return 1; }
-        const int idx = pk->addkey(n1);
-        if (idx < 0) { std::fprintf(stderr, "addkey failed (all 8 slots full?)\n"); return 1; }
-        std::fprintf(stderr, "added password in slot %d (%d in use)\n", idx, pk->num_keys());
-        return 0;
-    }
-    if (c == "rmkey" && a.size() == 2) {
-        if (!pk->rmkey(std::atoi(a[1].c_str()))) {
-            std::fprintf(stderr, "rmkey failed (in-use, last, or empty slot?)\n"); return 1;
-        }
-        std::fprintf(stderr, "revoked slot %s (%d left)\n", a[1].c_str(), pk->num_keys());
+        std::fprintf(stderr, "password changed; the old one no longer opens this pack\n");
         return 0;
     }
     std::fprintf(stderr, "unknown or malformed command: %s (try 'help')\n", c.c_str());
@@ -196,17 +176,13 @@ static void shell_help() {
         "  cp <from> <to>        copy (dedup, 0 extra bytes)\n"
         "  stat <path>           size + mtime\n"
         "  compact               reclaim deleted space\n"
-        "  keys                  how many passwords/slots are in use\n"
-        "  rekey                 change this password (new password, twice)\n"
-        "  addkey                add another password (new password, twice)\n"
-        "  rmkey <slot>          revoke a password slot\n"
+        "  rekey                 change the password (new password, twice)\n"
         "  help                  this list\n"
         "  quit | exit           close and leave\n");
 }
 
 static int shell(Pack* pk, const std::string& pack_path) {
-    std::fprintf(stderr, "opened %s — %d key slot(s). 'help' for commands, 'quit' to exit.\n",
-                 pack_path.c_str(), pk->num_keys());
+    std::fprintf(stderr, "opened %s — 'help' for commands, 'quit' to exit.\n", pack_path.c_str());
     std::string line;
     while (true) {
         if (::isatty(STDIN_FILENO)) { std::fprintf(stderr, "sealpack> "); std::fflush(stderr); }
@@ -224,7 +200,7 @@ static int shell(Pack* pk, const std::string& pack_path) {
 
 static bool is_command(const std::string& s) {
     static const char* k[] = {"create","add","get","ls","rm","mv","cp","stat",
-                              "compact","rekey","addkey","rmkey","keys","web"};
+                              "compact","rekey","web"};
     for (auto c : k) if (s == c) return true;
     return false;
 }
@@ -235,7 +211,7 @@ static int usage() {
         "  sealpack <pack>               open + interactive shell (prompts for password)\n"
         "  sealpack create <pack>        create a new pack (prompts for password twice)\n"
         "  sealpack <cmd> <pack> [args]  one-shot: ls/add/get/rm/mv/cp/stat/compact/\n"
-        "                                keys/rekey/addkey/rmkey; or  web <pack> [port]\n"
+        "                                rekey; or  web <pack> [port]\n"
         "  one-shot prompts for the password on a terminal, else uses $SEALPACK_PASSWORD\n");
     return 2;
 }

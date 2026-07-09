@@ -118,25 +118,14 @@ int sealpack_stat(sealpack_t* sp, const char* path, sealpack_entry* out);
 // Atomic: writes a new file and swaps it in, so a crash keeps the old one.
 int sealpack_compact(sealpack_t* sp);
 
-// ---- key slots: multiple passwords / rotation -------------------------------
-// Data is under a random master key; each password just wraps it into one of 8
-// slots. These rewrite one 88-byte slot — the data blobs never move, so it's
-// instant even on a multi-GB pack. Empty password ("") is allowed but gives no
-// protection (public salt → anyone opens it).
+// ---- password ---------------------------------------------------------------
+// Data is under a random master key; the password only wraps it into an 88-byte
+// slot, so changing it rewrites that slot alone — the data blobs never move, so
+// it's instant even on a multi-GB pack. Empty password ("") is allowed but gives
+// no protection (public salt → anyone opens it).
 
-// Change the password that opened THIS handle; the old password stops working.
+// Change the password. The old password stops working.
 int sealpack_rekey(sealpack_t* sp, const char* new_password);
-
-// Add another password that also opens the pack. Returns the new slot index
-// (>=0), or <0 on error (all 8 slots full -> SEALPACK_ERR_EXISTS).
-int sealpack_addkey(sealpack_t* sp, const char* new_password);
-
-// Revoke the password in `slot_idx`. Refuses the slot in use and the last one
-// (removing it would make the pack unopenable).
-int sealpack_rmkey(sealpack_t* sp, int slot_idx);
-
-// Number of key slots currently in use (1..8).
-int sealpack_num_keys(sealpack_t* sp);
 
 // ---- misc -------------------------------------------------------------------
 

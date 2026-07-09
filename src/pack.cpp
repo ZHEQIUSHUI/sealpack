@@ -357,40 +357,6 @@ bool Pack::rekey(const std::string& new_password) {
     return true;
 }
 
-int Pack::addkey(const std::string& new_password) {
-    Impl& im = *impl_;
-    int idx = -1;
-    for (int i = 0; i < kNumKeySlots; ++i) if (im.store->slot(i).empty()) { idx = i; break; }
-    if (idx < 0) { im.last_err = SEALPACK_ERR_EXISTS; return -1; }  // all slots full
-    KeySlot slot;
-    if (!wrap_master(&slot, im.key, new_password, im.store->kdf()) ||
-        !im.store->write_slot(idx, slot)) {
-        im.last_err = SEALPACK_ERR_IO; return -1;
-    }
-    im.last_err = SEALPACK_OK;
-    return idx;
-}
-
-bool Pack::rmkey(int slot_idx) {
-    Impl& im = *impl_;
-    if (slot_idx < 0 || slot_idx >= kNumKeySlots) { im.last_err = SEALPACK_ERR_ARG; return false; }
-    if (slot_idx == im.opened_slot) { im.last_err = SEALPACK_ERR_ARG; return false; }  // not the one in use
-    if (im.store->slot(slot_idx).empty()) { im.last_err = SEALPACK_ERR_NOTFOUND; return false; }
-    if (num_keys() <= 1) { im.last_err = SEALPACK_ERR_ARG; return false; }  // never leave it unopenable
-    KeySlot empty;  // all-zero salt = empty
-    if (!im.store->write_slot(slot_idx, empty)) { im.last_err = SEALPACK_ERR_IO; return false; }
-    im.last_err = SEALPACK_OK;
-    return true;
-}
-
-int Pack::num_keys() const {
-    int n = 0;
-    for (int i = 0; i < kNumKeySlots; ++i) if (!impl_->store->slot(i).empty()) n++;
-    return n;
-}
-
-int Pack::opened_slot() const { return impl_->opened_slot; }
-
 int Pack::last_error() const { return impl_->last_err; }
 
 }  // namespace sealpack

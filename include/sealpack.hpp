@@ -60,17 +60,13 @@ public:
     bool commit();    // atomic double-superblock swap (the crash-safe point)
     bool compact();   // rewrite the file dropping unreferenced blobs
 
-    // ---- key slots: multiple passwords, rotate without re-encrypting ----
-    // Data is under a random master key; each password wraps that key into one
-    // of 8 slots. These rewrite an 88-byte slot only — blobs never move, so it's
-    // instant even on a multi-GB pack. An empty password ("") is allowed but
-    // offers no protection (the salt is public → anyone can open it).
-    bool verify_password(const std::string& password) const;  // does `password` open THIS handle's slot?
-    bool rekey(const std::string& new_password);   // re-wrap under a new password in THIS handle's slot
-    int  addkey(const std::string& new_password);  // wrap into a free slot → its index, or -1 if full
-    bool rmkey(int slot_idx);                       // revoke a slot (not the one in use, not the last)
-    int  num_keys() const;                          // slots currently in use (1..8)
-    int  opened_slot() const;                       // slot index this handle's password opened
+    // ---- password: change it without re-encrypting the data ----
+    // Data is under a random master key; the password only wraps that key into
+    // an 88-byte slot, so rekey rewrites that slot alone — the blobs never move,
+    // so it's instant even on a multi-GB pack. An empty password ("") is allowed
+    // but offers no protection (the salt is public → anyone can open it).
+    bool verify_password(const std::string& password) const;  // does `password` open this pack?
+    bool rekey(const std::string& new_password);              // change the password
 
     int last_error() const;  // sealpack_status code of the last failing call
 

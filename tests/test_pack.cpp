@@ -92,48 +92,20 @@ TEST_MAIN("pack") {
         CHECK(got == "MODEL-B-V2");
     }
 
-    // ---- key slots: addkey / rekey / rmkey (data blobs never re-encrypted) ----
+    // ---- rekey: change the password without re-encrypting the blobs ----
     {
         auto pk = Pack::open(kPath, "hunter2");
         CHECK(pk != nullptr);
-        CHECK_EQ(pk->num_keys(), 1);
-        CHECK_EQ(pk->opened_slot(), 0);
-
-        // a second password opens the SAME pack (multi-key)
-        CHECK_EQ(pk->addkey("second-pw"), 1);
-        CHECK_EQ(pk->num_keys(), 2);
-        pk.reset();  // slots persist immediately — no commit needed
-
-        auto b = Pack::open(kPath, "second-pw");
-        CHECK(b != nullptr);
-        CHECK_EQ(b->opened_slot(), 1);
-        std::string got;
-        CHECK(b->get("yolo/v2.axmodel", &got));
-        CHECK(got == "MODEL-B-V2");        // second password decrypts the same data
-        b.reset();
-
-        // rekey slot 0: old password dies, new one works, blobs intact
-        auto c = Pack::open(kPath, "hunter2");
-        CHECK(c != nullptr);
-        CHECK(c->rekey("hunter3"));
-        c.reset();
+        CHECK(pk->verify_password("hunter2"));            // the current password verifies
+        CHECK(!pk->verify_password("nope"));
+        CHECK(pk->rekey("hunter3"));
+        pk.reset();
         CHECK(Pack::open(kPath, "hunter2") == nullptr);   // old password no longer opens
         auto d = Pack::open(kPath, "hunter3");
         CHECK(d != nullptr);
+        std::string got;
         CHECK(d->get("yolo/v2.axmodel", &got));
-        CHECK(got == "MODEL-B-V2");
-        d.reset();
-
-        // rmkey: revoke slot 1 from slot 0; can't remove the in-use / last slot
-        auto e = Pack::open(kPath, "hunter3");
-        CHECK(e != nullptr);
-        CHECK_EQ(e->opened_slot(), 0);
-        CHECK(e->rmkey(1));
-        CHECK_EQ(e->num_keys(), 1);
-        CHECK(!e->rmkey(0));              // refuse: in use AND last remaining
-        e.reset();
-        CHECK(Pack::open(kPath, "second-pw") == nullptr);  // revoked password is dead
-        CHECK(Pack::open(kPath, "hunter3") != nullptr);
+        CHECK(got == "MODEL-B-V2");                        // blobs intact — rekey only rewrote the slot
     }
 
     ::unlink(kPath);
