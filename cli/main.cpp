@@ -78,6 +78,18 @@ static std::vector<std::string> tokenize(const std::string& s) {
     return t;
 }
 
+// Human-readable size like the web UI (512 B, 4.0 KB, 176.7 MB) — raw bytes are
+// unreadable at model scale.
+static std::string human_size(uint64_t n) {
+    const char* u[] = {"B", "KB", "MB", "GB", "TB"};
+    double v = static_cast<double>(n);
+    int i = 0;
+    while (v >= 1024.0 && i < 4) { v /= 1024.0; ++i; }
+    char buf[32];
+    std::snprintf(buf, sizeof buf, i == 0 ? "%.0f %s" : "%.1f %s", v, u[i]);
+    return buf;
+}
+
 // ---- command execution (shared by the shell and one-shot mode) --------------
 
 // Run one command against an already-open pack. Prints its own errors; returns
@@ -91,7 +103,7 @@ static int do_command(Pack* pk, const std::vector<std::string>& a) {
         const std::string pre = a.size() >= 2 ? a[1] : "";
         for (const auto& e : pk->list())
             if (pre.empty() || e.path.rfind(pre, 0) == 0)
-                std::printf("%12llu  %s\n", static_cast<unsigned long long>(e.size), e.path.c_str());
+                std::printf("%10s  %s\n", human_size(e.size).c_str(), e.path.c_str());
         return 0;
     }
     if (c == "get" && a.size() >= 2) {
@@ -130,7 +142,7 @@ static int do_command(Pack* pk, const std::vector<std::string>& a) {
     if (c == "stat" && a.size() == 2) {
         Pack::Entry e;
         if (!pk->stat(a[1], &e)) { std::fprintf(stderr, "not found: %s\n", a[1].c_str()); return 1; }
-        std::printf("%s  %llu bytes  mtime=%llu\n", e.path.c_str(),
+        std::printf("%s  %s (%llu bytes)  mtime=%llu\n", e.path.c_str(), human_size(e.size).c_str(),
                     static_cast<unsigned long long>(e.size), static_cast<unsigned long long>(e.mtime));
         return 0;
     }
