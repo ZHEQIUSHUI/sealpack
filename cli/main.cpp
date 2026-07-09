@@ -9,6 +9,10 @@
 //   sealpack mv       <pack> <from> <to>
 //   sealpack cp       <pack> <from> <to>
 //   sealpack compact  <pack>
+//   sealpack rekey    <pack>              ($SEALPACK_PASSWORD -> $SEALPACK_NEW_PASSWORD)
+//   sealpack addkey   <pack>              (adds $SEALPACK_NEW_PASSWORD)
+//   sealpack rmkey    <pack> <slot>
+//   sealpack keys     <pack>
 
 #include <cstdio>
 #include <cstdlib>
@@ -24,9 +28,22 @@ using sealpack::Pack;
 // defined in cli/web.cpp
 int run_web(Pack* pack, const std::string& pack_path, const std::string& host, int port);
 
-static std::string password() {
+// Password from $SEALPACK_PASSWORD. Returns false only if the var is UNSET;
+// set-but-empty ("") is a valid (unprotected) password, so we distinguish the
+// two — getenv gives NULL vs "" for that.
+static bool password(std::string* out) {
     const char* e = ::getenv("SEALPACK_PASSWORD");
-    return e ? std::string(e) : std::string();
+    if (!e) return false;
+    *out = e;
+    return true;
+}
+
+// New password for rekey/addkey, from $SEALPACK_NEW_PASSWORD (empty "" allowed).
+static bool new_password(std::string* out) {
+    const char* e = ::getenv("SEALPACK_NEW_PASSWORD");
+    if (!e) return false;
+    *out = e;
+    return true;
 }
 
 static bool read_file(const char* path, std::string* out) {
@@ -56,6 +73,10 @@ static int usage() {
         "  mv      <pack> <from> <to>\n"
         "  cp      <pack> <from> <to>\n"
         "  compact <pack>\n"
+        "  rekey   <pack>               change password ($SEALPACK_PASSWORD -> $SEALPACK_NEW_PASSWORD)\n"
+        "  addkey  <pack>               add a password ($SEALPACK_NEW_PASSWORD)\n"
+        "  rmkey   <pack> <slot>        revoke the password in a slot\n"
+        "  keys    <pack>               show how many key slots are in use\n"
         "  web     <pack> [port]        file-manager UI in the browser (default 8777)\n");
     return 2;
 }
@@ -64,9 +85,10 @@ int main(int argc, char** argv) {
     if (argc < 3) return usage();
     const std::string cmd = argv[1];
     const char* pack = argv[2];
-    const std::string pw = password();
-    if (pw.empty()) {
-        std::fprintf(stderr, "set $SEALPACK_PASSWORD\n");
+    std::string pw;
+    if (!password(&pw)) {
+        std::fprintf(stderr, "set $SEALPACK_PASSWORD "
+                             "(use `export SEALPACK_PASSWORD=` for an empty/unprotected password)\n");
         return 2;
     }
 
@@ -115,6 +137,36 @@ int main(int argc, char** argv) {
     }
     if (cmd == "compact" && argc == 3) {
         if (!pk->compact()) { std::fprintf(stderr, "compact failed\n"); return 1; }
+        return 0;
+    }
+    if (cmd == "rekey" && argc == 3) {
+        std::string np;
+        if (!new_password(&np)) { std::fprintf(stderr, "set $SEALPACK_NEW_PASSWORD\n"); return 2; }
+        if (!pk->rekey(np)) { std::fprintf(stderr, "rekey failed\n"); return 1; }
+        std::fprintf(stderr, "password changed (slot %d); the old password no longer opens this pack\n",
+                     pk->opened_slot());
+        return 0;
+    }
+    if (cmd == "addkey" && argc == 3) {
+        std::string np;
+        if (!new_password(&np)) { std::fprintf(stderr, "set $SEALPACK_NEW_PASSWORD\n"); return 2; }
+        int idx = pk->addkey(np);
+        if (idx < 0) { std::fprintf(stderr, "addkey failed (all 8 slots full?)\n"); return 1; }
+        std::fprintf(stderr, "added password in slot %d (%d slot(s) now in use)\n", idx, pk->num_keys());
+        return 0;
+    }
+    if (cmd == "rmkey" && argc == 4) {
+        const int slot = std::atoi(argv[3]);
+        if (!pk->rmkey(slot)) {
+            std::fprintf(stderr, "rmkey failed (in-use slot, last remaining slot, or already empty?)\n");
+            return 1;
+        }
+        std::fprintf(stderr, "revoked slot %d (%d slot(s) left)\n", slot, pk->num_keys());
+        return 0;
+    }
+    if (cmd == "keys" && argc == 3) {
+        std::printf("%d key slot(s) in use; this password opened slot %d\n",
+                    pk->num_keys(), pk->opened_slot());
         return 0;
     }
     return usage();

@@ -9,9 +9,10 @@
 using namespace sealpack;
 
 // Superblock slots sit at fixed offsets (see the layout in src/store.cpp):
-//   40  Superblock A   104  Superblock B   (64 bytes each)
-static constexpr long kSbA = 40;
-static constexpr long kSbB = 104;
+// header(24) + 8 key slots(8*88 = 704), then the two 64-byte superblocks.
+//   728  Superblock A   792  Superblock B
+static constexpr long kSbA = 728;
+static constexpr long kSbB = 792;
 static constexpr long kSbSize = 64;
 
 static const char* kPath = "/tmp/sealpack_test_crash.sealpack";

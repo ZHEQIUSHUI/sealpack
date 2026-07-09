@@ -95,6 +95,27 @@ int sealpack_compact(sealpack_t* sp) {
     return sp->pack->compact() ? SEALPACK_OK : sp->pack->last_error();
 }
 
+int sealpack_rekey(sealpack_t* sp, const char* new_password) {
+    if (!sp || !new_password) return SEALPACK_ERR_ARG;
+    return sp->pack->rekey(new_password) ? SEALPACK_OK : sp->pack->last_error();
+}
+
+int sealpack_addkey(sealpack_t* sp, const char* new_password) {
+    if (!sp || !new_password) return SEALPACK_ERR_ARG;
+    int idx = sp->pack->addkey(new_password);
+    return idx >= 0 ? idx : sp->pack->last_error();  // >=0 = new slot index, else error
+}
+
+int sealpack_rmkey(sealpack_t* sp, int slot_idx) {
+    if (!sp) return SEALPACK_ERR_ARG;
+    return sp->pack->rmkey(slot_idx) ? SEALPACK_OK : sp->pack->last_error();
+}
+
+int sealpack_num_keys(sealpack_t* sp) {
+    if (!sp) return SEALPACK_ERR_ARG;
+    return sp->pack->num_keys();
+}
+
 int sealpack_list(sealpack_t* sp, sealpack_entry** entries, size_t* count) {
     if (!sp || !entries || !count) return SEALPACK_ERR_ARG;
     sp->list_cache = sp->pack->list();

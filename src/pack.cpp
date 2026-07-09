@@ -76,13 +76,48 @@ bool load_manifest(Store& st, const uint8_t key[kKeyBytes], Index* out) {
     return deserialize(reinterpret_cast<const uint8_t*>(plain.data()), plain.size(), out);
 }
 
+// ---- key wrapping: a password wraps the random master key into a key slot ----
+
+// Fill slot.salt + slot.wrapped so `password` unlocks `master`. Fresh random
+// salt + nonce each call, so rewrapping the same master under the same password
+// still yields different ciphertext.
+bool wrap_master(KeySlot* slot, const uint8_t master[kKeyBytes],
+                 const std::string& password, const KdfParams& kdf) {
+    if (random_bytes(slot->salt, kSaltBytes) != 0) return false;
+    uint8_t kek[kKeyBytes];
+    if (derive_key(kek, password.c_str(), slot->salt, kdf) != 0) { wipe(kek, kKeyBytes); return false; }
+    uint8_t* nonce  = slot->wrapped;
+    uint8_t* mac    = slot->wrapped + kNonceBytes;
+    uint8_t* cipher = slot->wrapped + kNonceBytes + kMacBytes;
+    bool ok = random_bytes(nonce, kNonceBytes) == 0;
+    if (ok) aead_encrypt(cipher, mac, kek, nonce, nullptr, 0, master, kKeyBytes);
+    wipe(kek, kKeyBytes);
+    return ok;
+}
+
+// Recover `master` from a slot using `password`. false = empty slot or wrong
+// password (AEAD auth fails — the "no password, no plaintext" guarantee).
+bool unwrap_master(uint8_t master[kKeyBytes], const KeySlot& slot,
+                   const std::string& password, const KdfParams& kdf) {
+    if (slot.empty()) return false;
+    uint8_t kek[kKeyBytes];
+    if (derive_key(kek, password.c_str(), slot.salt, kdf) != 0) { wipe(kek, kKeyBytes); return false; }
+    const uint8_t* nonce  = slot.wrapped;
+    const uint8_t* mac    = slot.wrapped + kNonceBytes;
+    const uint8_t* cipher = slot.wrapped + kNonceBytes + kMacBytes;
+    int rc = aead_decrypt(master, mac, kek, nonce, nullptr, 0, cipher, kKeyBytes);
+    wipe(kek, kKeyBytes);
+    return rc == 0;
+}
+
 }  // namespace
 
 struct Pack::Impl {
     std::string            path;
     std::unique_ptr<Store> store;
     Index                  index;
-    uint8_t                key[kKeyBytes] = {0};
+    uint8_t                key[kKeyBytes] = {0};  // random master key (unwrapped from a slot)
+    int                    opened_slot = 0;       // which key slot the password opened
     mutable int            last_err = SEALPACK_OK;
     ~Impl() { wipe(key, sizeof key); }
 };
@@ -91,41 +126,46 @@ Pack::Pack() : impl_(new Impl) {}
 Pack::~Pack() = default;
 
 std::unique_ptr<Pack> Pack::create(const std::string& path, const std::string& password) {
-    uint8_t salt[kSaltBytes];
-    if (random_bytes(salt, kSaltBytes) != 0) return nullptr;
+    uint8_t master[kKeyBytes];
+    if (random_bytes(master, kKeyBytes) != 0) return nullptr;  // random master key
     KdfParams kdf;
-    uint8_t key[kKeyBytes];
-    if (derive_key(key, password.c_str(), salt, kdf) != 0) { wipe(key, kKeyBytes); return nullptr; }
+    KeySlot slot0;
+    if (!wrap_master(&slot0, master, password, kdf)) { wipe(master, kKeyBytes); return nullptr; }
 
-    StoreHeader hdr{};
-    std::memcpy(hdr.salt, salt, kSaltBytes);
-    hdr.kdf = kdf;
-    auto store = Store::create(path, hdr, key);
-    if (!store) { wipe(key, kKeyBytes); return nullptr; }
+    auto store = Store::create(path, master, kdf);
+    if (!store || !store->write_slot(0, slot0)) { wipe(master, kKeyBytes); return nullptr; }
 
     std::unique_ptr<Pack> pk(new Pack);
     pk->impl_->path = path;
     pk->impl_->store = std::move(store);
-    std::memcpy(pk->impl_->key, key, kKeyBytes);
-    wipe(key, kKeyBytes);
+    std::memcpy(pk->impl_->key, master, kKeyBytes);
+    pk->impl_->opened_slot = 0;
+    wipe(master, kKeyBytes);
     return pk;
 }
 
 std::unique_ptr<Pack> Pack::open(const std::string& path, const std::string& password) {
-    StoreHeader hdr{};
-    if (!Store::read_header(path, &hdr)) return nullptr;
-    uint8_t key[kKeyBytes];
-    if (derive_key(key, password.c_str(), hdr.salt, hdr.kdf) != 0) { wipe(key, kKeyBytes); return nullptr; }
-    auto store = Store::open(path, key);
-    if (!store) { wipe(key, kKeyBytes); return nullptr; }  // wrong password
+    KdfParams kdf;
+    KeySlot slots[kNumKeySlots];
+    if (!Store::read_meta(path, &kdf, slots)) return nullptr;
+
+    uint8_t master[kKeyBytes];
+    int opened = -1;
+    for (int i = 0; i < kNumKeySlots; ++i)
+        if (unwrap_master(master, slots[i], password, kdf)) { opened = i; break; }
+    if (opened < 0) { wipe(master, kKeyBytes); return nullptr; }  // wrong password / no matching slot
+
+    auto store = Store::open(path, master);
+    if (!store) { wipe(master, kKeyBytes); return nullptr; }
     Index idx;
-    if (!load_manifest(*store, key, &idx)) { wipe(key, kKeyBytes); return nullptr; }
+    if (!load_manifest(*store, master, &idx)) { wipe(master, kKeyBytes); return nullptr; }
 
     std::unique_ptr<Pack> pk(new Pack);
     pk->impl_->path = path;
     pk->impl_->store = std::move(store);
-    std::memcpy(pk->impl_->key, key, kKeyBytes);
-    wipe(key, kKeyBytes);
+    std::memcpy(pk->impl_->key, master, kKeyBytes);
+    pk->impl_->opened_slot = opened;
+    wipe(master, kKeyBytes);
     pk->impl_->index = std::move(idx);
     return pk;
 }
@@ -257,9 +297,12 @@ bool Pack::compact() {
     const std::string tmp = im.path + ".compact.tmp";
     ::unlink(tmp.c_str());
 
-    StoreHeader hdr = im.store->header();  // reuse salt/kdf → same key
-    auto ns = Store::create(tmp, hdr, im.key);
+    auto ns = Store::create(tmp, im.key, im.store->kdf());  // same master key, fresh file
     if (!ns) { im.last_err = SEALPACK_ERR_IO; return false; }
+    for (int i = 0; i < kNumKeySlots; ++i) {  // carry over every password slot
+        KeySlot s = im.store->slot(i);
+        if (!s.empty() && !ns->write_slot(i, s)) { im.last_err = SEALPACK_ERR_IO; return false; }
+    }
 
     Index nidx;
     for (const auto& kv : im.index.blobs) {
@@ -291,6 +334,62 @@ bool Pack::compact() {
     im.last_err = SEALPACK_OK;
     return true;
 }
+
+bool Pack::verify_password(const std::string& password) const {
+    Impl& im = *impl_;
+    KeySlot s = im.store->slot(im.opened_slot);
+    uint8_t m[kKeyBytes];
+    // True only if `password` unwraps THIS handle's slot to the same master key.
+    bool ok = unwrap_master(m, s, password, im.store->kdf()) &&
+              ct_equal(m, im.key, kKeyBytes) == 1;
+    wipe(m, kKeyBytes);
+    return ok;
+}
+
+bool Pack::rekey(const std::string& new_password) {
+    Impl& im = *impl_;
+    KeySlot slot;
+    if (!wrap_master(&slot, im.key, new_password, im.store->kdf()) ||
+        !im.store->write_slot(im.opened_slot, slot)) {
+        im.last_err = SEALPACK_ERR_IO; return false;
+    }
+    im.last_err = SEALPACK_OK;
+    return true;
+}
+
+int Pack::addkey(const std::string& new_password) {
+    Impl& im = *impl_;
+    int idx = -1;
+    for (int i = 0; i < kNumKeySlots; ++i) if (im.store->slot(i).empty()) { idx = i; break; }
+    if (idx < 0) { im.last_err = SEALPACK_ERR_EXISTS; return -1; }  // all slots full
+    KeySlot slot;
+    if (!wrap_master(&slot, im.key, new_password, im.store->kdf()) ||
+        !im.store->write_slot(idx, slot)) {
+        im.last_err = SEALPACK_ERR_IO; return -1;
+    }
+    im.last_err = SEALPACK_OK;
+    return idx;
+}
+
+bool Pack::rmkey(int slot_idx) {
+    Impl& im = *impl_;
+    if (slot_idx < 0 || slot_idx >= kNumKeySlots) { im.last_err = SEALPACK_ERR_ARG; return false; }
+    if (slot_idx == im.opened_slot) { im.last_err = SEALPACK_ERR_ARG; return false; }  // not the one in use
+    if (im.store->slot(slot_idx).empty()) { im.last_err = SEALPACK_ERR_NOTFOUND; return false; }
+    if (num_keys() <= 1) { im.last_err = SEALPACK_ERR_ARG; return false; }  // never leave it unopenable
+    KeySlot empty;  // all-zero salt = empty
+    if (!im.store->write_slot(slot_idx, empty)) { im.last_err = SEALPACK_ERR_IO; return false; }
+    im.last_err = SEALPACK_OK;
+    return true;
+}
+
+int Pack::num_keys() const {
+    int n = 0;
+    for (int i = 0; i < kNumKeySlots; ++i) if (!impl_->store->slot(i).empty()) n++;
+    return n;
+}
+
+int Pack::opened_slot() const { return impl_->opened_slot; }
 
 int Pack::last_error() const { return impl_->last_err; }
 

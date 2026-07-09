@@ -6,6 +6,7 @@
 // so another site (CSRF) or a stray same-host process can't drive it.
 
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <mutex>
 #include <string>
@@ -80,10 +81,49 @@ const char* kIndexHtml = R"HTML(<!doctype html>
  .name{cursor:default}
  .dir .name{cursor:pointer;color:var(--dir)} .dir .name:hover{text-decoration:underline}
  .empty{color:var(--mut);padding:30px 0;text-align:center}
+ .keys{border:1px solid var(--line);border-radius:9px;padding:14px 16px;margin-bottom:16px;background:#12151c}
+ .keys h3{margin:0 0 4px;font-size:14px} .keys>.mut{font-size:12px}
+ .keys section{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+ .keys label{display:block;color:var(--mut);font-size:12px;margin:6px 0 2px}
+ .keys input{width:200px} .keys .row{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end}
+ .keys .msg{margin-top:8px;font-size:12px;min-height:15px}
+ .keys .msg.ok{color:#5ac47d} .keys .msg.err{color:#e06c6c}
 </style></head>
 <body>
-<header><b>sealpack</b><span class="mut">file manager</span></header>
+<header><b>sealpack</b><span class="mut">file manager</span>
+ <button onclick="toggleKeys()" style="margin-left:auto">&#128273; Keys</button></header>
 <main>
+ <div class="keys" id="keys" style="display:none">
+   <h3>&#128273; Key slots</h3>
+   <div class="mut" id="keysInfo">…</div>
+   <section>
+     <b>Change password</b> <span class="mut">(rekey — current password required)</span>
+     <div class="row">
+       <div><label>current password</label><input type="password" id="rk_old"></div>
+       <div><label>new password</label><input type="password" id="rk_new1"></div>
+       <div><label>confirm new password</label><input type="password" id="rk_new2"></div>
+       <button class="acc" onclick="doRekey()">Change</button>
+     </div>
+     <div class="msg" id="rk_msg"></div>
+   </section>
+   <section>
+     <b>Add a password</b> <span class="mut">(another password that also opens this pack)</span>
+     <div class="row">
+       <div><label>new password</label><input type="password" id="ak_new1"></div>
+       <div><label>confirm new password</label><input type="password" id="ak_new2"></div>
+       <button onclick="doAddkey()">Add</button>
+     </div>
+     <div class="msg" id="ak_msg"></div>
+   </section>
+   <section>
+     <b>Revoke a slot</b> <span class="mut">(disable one password; not the one you're using)</span>
+     <div class="row">
+       <div><label>slot number</label><input type="number" id="rv_slot" min="0" max="7" style="width:80px"></div>
+       <button onclick="doRmkey()">Revoke</button>
+     </div>
+     <div class="msg" id="rv_msg"></div>
+   </section>
+ </div>
  <div class="crumb" id="crumb"></div>
  <div class="up">
    <input type="file" id="file">
@@ -149,6 +189,28 @@ async function post(url){const r=await fetch(url,{method:"POST",headers:H});if(!
 async function rm(p){if(confirm("delete "+p+" ?"))if(await post("/api/del?path="+encodeURIComponent(p)))refresh()}
 async function ren(p,name){const t=prompt("rename to (in this folder):",name);if(t&&t!==name)if(await post("/api/move?from="+encodeURIComponent(p)+"&to="+encodeURIComponent(cwd+t)))refresh()}
 async function cp(p){const t=prompt("copy to (full path):",p);if(t&&t!==p)if(await post("/api/copy?from="+encodeURIComponent(p)+"&to="+encodeURIComponent(t)))refresh()}
+// ---- key management ----
+function g(id){return document.getElementById(id)}
+function setMsg(id,ok,text){const m=g(id);m.className="msg "+(ok?"ok":"err");m.textContent=text}
+async function loadKeys(){const r=await fetch("/api/keys",{headers:H});if(!r.ok)return;const k=await r.json();
+ g("keysInfo").textContent=k.num+" slot(s) in use · this session opened slot "+k.opened}
+function toggleKeys(){const d=g("keys");const show=d.style.display==="none";d.style.display=show?"block":"none";if(show)loadKeys()}
+function postForm(url,body){return fetch(url,{method:"POST",headers:Object.assign({"Content-Type":"application/x-www-form-urlencoded"},H),body:body})}
+async function doRekey(){const o=g("rk_old").value,a=g("rk_new1").value,b=g("rk_new2").value;
+ if(!a){setMsg("rk_msg",false,"new password is empty (that removes protection)");return}
+ if(a!==b){setMsg("rk_msg",false,"the two new passwords don't match");return}
+ const r=await postForm("/api/rekey","old="+encodeURIComponent(o)+"&new="+encodeURIComponent(a));
+ if(r.ok){setMsg("rk_msg",true,"password changed — the old one no longer opens this pack");g("rk_old").value=g("rk_new1").value=g("rk_new2").value="";loadKeys()}
+ else setMsg("rk_msg",false,await r.text())}
+async function doAddkey(){const a=g("ak_new1").value,b=g("ak_new2").value;
+ if(a!==b){setMsg("ak_msg",false,"the two passwords don't match");return}
+ const r=await postForm("/api/addkey","new="+encodeURIComponent(a));
+ if(r.ok){setMsg("ak_msg",true,"added in slot "+(await r.text()));g("ak_new1").value=g("ak_new2").value="";loadKeys()}
+ else setMsg("ak_msg",false,await r.text())}
+async function doRmkey(){const s=g("rv_slot").value;if(s===""){setMsg("rv_msg",false,"enter a slot number");return}
+ const r=await postForm("/api/rmkey","slot="+encodeURIComponent(s));
+ if(r.ok){setMsg("rv_msg",true,"revoked slot "+s);g("rv_slot").value="";loadKeys()}
+ else setMsg("rv_msg",false,await r.text())}
 refresh();
 </script></body></html>)HTML";
 
@@ -224,6 +286,41 @@ int run_web(Pack* pack, const std::string& pack_path,
         if (!authed(req)) { res.status = 403; return; }
         std::lock_guard<std::mutex> lk(mu);
         commit_reply(pack->copy(req.get_param_value("from"), req.get_param_value("to")), res);
+    });
+
+    // ---- key slots: rekey / addkey / rmkey (rewrite an 88-byte slot; blobs
+    // never move, so these are instant even on a multi-GB pack) ----
+    srv.Get("/api/keys", [&](const httplib::Request& req, httplib::Response& res) {
+        if (!authed(req)) { res.status = 403; return; }
+        std::lock_guard<std::mutex> lk(mu);
+        res.set_content("{\"num\":" + std::to_string(pack->num_keys()) +
+                        ",\"opened\":" + std::to_string(pack->opened_slot()) + "}",
+                        "application/json");
+    });
+    srv.Post("/api/rekey", [&](const httplib::Request& req, httplib::Response& res) {
+        if (!authed(req)) { res.status = 403; return; }
+        std::lock_guard<std::mutex> lk(mu);
+        // The page is already open with the pack — still require the current
+        // password so a left-open tab can't silently change it.
+        if (!pack->verify_password(req.get_param_value("old"))) {
+            res.status = 403; res.set_content("current password is wrong", "text/plain"); return;
+        }
+        if (pack->rekey(req.get_param_value("new"))) res.set_content("ok", "text/plain");
+        else { res.status = 400; res.set_content("rekey failed", "text/plain"); }
+    });
+    srv.Post("/api/addkey", [&](const httplib::Request& req, httplib::Response& res) {
+        if (!authed(req)) { res.status = 403; return; }
+        std::lock_guard<std::mutex> lk(mu);
+        int idx = pack->addkey(req.get_param_value("new"));
+        if (idx >= 0) res.set_content(std::to_string(idx), "text/plain");
+        else { res.status = 400; res.set_content("addkey failed (all 8 slots full?)", "text/plain"); }
+    });
+    srv.Post("/api/rmkey", [&](const httplib::Request& req, httplib::Response& res) {
+        if (!authed(req)) { res.status = 403; return; }
+        std::lock_guard<std::mutex> lk(mu);
+        if (pack->rmkey(std::atoi(req.get_param_value("slot").c_str())))
+            res.set_content("ok", "text/plain");
+        else { res.status = 400; res.set_content("revoke failed (in-use, last, or empty slot)", "text/plain"); }
     });
 
     std::fprintf(stderr, "sealpack web: %s\n  open  http://%s:%d/?t=%s\n",
