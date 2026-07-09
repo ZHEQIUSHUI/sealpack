@@ -49,16 +49,22 @@ std::string json_escape(const std::string& s) {
     return o;
 }
 
-// Embedded front-end. %%TOKEN%% is replaced per-server-start.
+// Embedded front-end — a folder-navigating file manager. %%TOKEN%% is replaced
+// per-server-start. /api/list returns every path; the browser groups them by
+// the current folder (subfolders you click into + files here), with a
+// breadcrumb, so it behaves like a real file manager rather than a flat list.
 const char* kIndexHtml = R"HTML(<!doctype html>
 <html><head><meta charset="utf-8"><title>sealpack</title>
 <style>
- :root{--bg:#0f1115;--fg:#e6e6e6;--mut:#9aa4b2;--acc:#4f8cff;--line:#232833}
+ :root{--bg:#0f1115;--fg:#e6e6e6;--mut:#9aa4b2;--acc:#4f8cff;--line:#232833;--dir:#e2b340}
  *{box-sizing:border-box}
  body{margin:0;font:14px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
- header{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;gap:12px;align-items:center}
+ header{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:baseline}
  header b{font-size:15px} header .mut{color:var(--mut)}
  main{padding:14px 18px}
+ .crumb{margin-bottom:12px}
+ .crumb a{color:var(--acc);cursor:pointer;text-decoration:none} .crumb a:hover{text-decoration:underline}
+ .crumb span{color:var(--mut)}
  .up{display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
  input,button{font:inherit;color:var(--fg);background:#171a21;border:1px solid var(--line);border-radius:7px;padding:7px 10px}
  button{cursor:pointer} button:hover{border-color:var(--acc)}
@@ -70,53 +76,80 @@ const char* kIndexHtml = R"HTML(<!doctype html>
  td.act{text-align:right;white-space:nowrap}
  td.act button{padding:4px 8px;margin-left:4px}
  tr:hover td{background:#141821}
- .path{font-family:ui-monospace,monospace}
+ .ico{display:inline-block;width:20px}
+ .name{cursor:default}
+ .dir .name{cursor:pointer;color:var(--dir)} .dir .name:hover{text-decoration:underline}
  .empty{color:var(--mut);padding:30px 0;text-align:center}
 </style></head>
 <body>
-<header><b>sealpack</b><span class="mut" id="pack"></span></header>
+<header><b>sealpack</b><span class="mut">file manager</span></header>
 <main>
+ <div class="crumb" id="crumb"></div>
  <div class="up">
    <input type="file" id="file">
-   <input type="text" id="dest" placeholder="path in pack, e.g. yolo/v2.axmodel" size="34">
-   <button class="acc" onclick="upload()">Upload</button>
+   <input type="text" id="dest" placeholder="name in this folder (optional)" size="26">
+   <button class="acc" onclick="upload()">Upload here</button>
+   <button onclick="refresh()">Refresh</button>
  </div>
- <table><thead><tr><th>Path</th><th>Size</th><th>Modified</th><th></th></tr></thead>
+ <table><thead><tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr></thead>
  <tbody id="rows"></tbody></table>
- <div class="empty" id="empty" style="display:none">empty pack — upload a file</div>
+ <div class="empty" id="empty" style="display:none">empty folder</div>
 </main>
 <script>
 const TOKEN="%%TOKEN%%";
 const H={"X-Sealpack-Token":TOKEN};
+let cwd="";     // current folder: "" = root, "seg/" = inside seg
+let ALL=[];     // full path list from the server
 function fmtSize(n){if(n<1024)return n+" B";let u=["KB","MB","GB"],i=-1;do{n/=1024;i++}while(n>=1024&&i<2);return n.toFixed(1)+" "+u[i]}
 function fmtTime(s){if(!s)return"";return new Date(s*1000).toLocaleString()}
-async function load(){
- const r=await fetch("/api/list",{headers:H});const items=await r.json();
+async function refresh(){const r=await fetch("/api/list",{headers:H});ALL=await r.json();render()}
+function render(){
+ const cb=document.getElementById("crumb");
+ let html='<a onclick="go(String())">root</a>';let acc="";
+ for(const seg of cwd.split("/").filter(Boolean)){acc+=seg+"/";html+=' <span>/</span> <a onclick="go(\''+acc+'\')">'+seg+'</a>'}
+ cb.innerHTML=html;
+ const dirs=new Map(),files=[];
+ for(const it of ALL){
+   if(!it.path.startsWith(cwd))continue;
+   const rest=it.path.slice(cwd.length);const i=rest.indexOf("/");
+   if(i===-1)files.push({name:rest,size:it.size,mtime:it.mtime,path:it.path});
+   else{const d=rest.slice(0,i);dirs.set(d,(dirs.get(d)||0)+1)}
+ }
  const rows=document.getElementById("rows");rows.innerHTML="";
- document.getElementById("empty").style.display=items.length?"none":"block";
- for(const it of items){
-   const tr=document.createElement("tr");
-   tr.innerHTML=`<td class="path">${it.path}</td><td class="sz">${fmtSize(it.size)}</td><td class="mt">${fmtTime(it.mtime)}</td>`+
-     `<td class="act"><button onclick="dl('${it.path}')">↓</button>`+
-     `<button onclick="ren('${it.path}')">rename</button>`+
-     `<button onclick="cp('${it.path}')">copy</button>`+
-     `<button onclick="rm('${it.path}')">✕</button></td>`;
+ for(const [d,cnt] of [...dirs.keys()].sort().map(k=>[k,dirs.get(k)])){
+   const tr=document.createElement("tr");tr.className="dir";
+   tr.innerHTML='<td><span class="ico">&#128193;</span><span class="name" onclick="go(\''+cwd+d+'/\')">'+d+'</span></td>'+
+     '<td class="sz">'+cnt+' item'+(cnt>1?'s':'')+'</td><td class="mt"></td><td class="act"></td>';
    rows.appendChild(tr);
  }
+ for(const f of files.sort((a,b)=>a.name<b.name?-1:1)){
+   const tr=document.createElement("tr");
+   tr.innerHTML='<td><span class="ico">&#128196;</span><span class="name">'+f.name+'</span></td>'+
+     '<td class="sz">'+fmtSize(f.size)+'</td><td class="mt">'+fmtTime(f.mtime)+'</td>'+
+     '<td class="act"><button onclick="dl(\''+f.path+'\')">&#8595;</button>'+
+     '<button onclick="ren(\''+f.path+'\',\''+f.name+'\')">rename</button>'+
+     '<button onclick="cp(\''+f.path+'\')">copy</button>'+
+     '<button onclick="rm(\''+f.path+'\')">&#10005;</button></td>';
+   rows.appendChild(tr);
+ }
+ document.getElementById("empty").style.display=(dirs.size||files.length)?"none":"block";
 }
+function go(dir){cwd=dir;render()}
 function dl(p){window.location="/api/get?t="+TOKEN+"&path="+encodeURIComponent(p)}
 async function upload(){
- const f=document.getElementById("file").files[0];const dest=document.getElementById("dest").value.trim();
- if(!f||!dest){alert("pick a file and a destination path");return}
+ const f=document.getElementById("file").files[0];let name=document.getElementById("dest").value.trim();
+ if(!f){alert("pick a file first");return}
+ if(!name)name=f.name;
  const buf=await f.arrayBuffer();
- const r=await fetch("/api/put?path="+encodeURIComponent(dest),{method:"POST",headers:H,body:buf});
- if(!r.ok){alert("upload failed: "+await r.text())}else{document.getElementById("dest").value="";load()}
+ const r=await fetch("/api/put?path="+encodeURIComponent(cwd+name),{method:"POST",headers:H,body:buf});
+ if(!r.ok)alert("upload failed: "+await r.text());
+ else{document.getElementById("dest").value="";document.getElementById("file").value="";refresh()}
 }
 async function post(url){const r=await fetch(url,{method:"POST",headers:H});if(!r.ok)alert(await r.text());return r.ok}
-async function rm(p){if(confirm("delete "+p+"?"))if(await post("/api/del?path="+encodeURIComponent(p)))load()}
-async function ren(p){const t=prompt("rename to:",p);if(t&&t!==p)if(await post("/api/move?from="+encodeURIComponent(p)+"&to="+encodeURIComponent(t)))load()}
-async function cp(p){const t=prompt("copy to:",p);if(t&&t!==p)if(await post("/api/copy?from="+encodeURIComponent(p)+"&to="+encodeURIComponent(t)))load()}
-load();
+async function rm(p){if(confirm("delete "+p+" ?"))if(await post("/api/del?path="+encodeURIComponent(p)))refresh()}
+async function ren(p,name){const t=prompt("rename to (in this folder):",name);if(t&&t!==name)if(await post("/api/move?from="+encodeURIComponent(p)+"&to="+encodeURIComponent(cwd+t)))refresh()}
+async function cp(p){const t=prompt("copy to (full path):",p);if(t&&t!==p)if(await post("/api/copy?from="+encodeURIComponent(p)+"&to="+encodeURIComponent(t)))refresh()}
+refresh();
 </script></body></html>)HTML";
 
 }  // namespace
