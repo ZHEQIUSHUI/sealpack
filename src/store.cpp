@@ -74,6 +74,20 @@ bool read_sb(int fd, uint64_t pos, const uint8_t key[kKeyBytes],
     return true;
 }
 
+// Flush to stable storage. On macOS plain fsync only reaches the drive cache,
+// not the platter — F_FULLFSYNC is what crash durability actually needs there.
+// On Linux fdatasync is enough and cheaper (data only, skips metadata).
+int durable_sync(int fd) {
+#if defined(__APPLE__)
+    if (::fcntl(fd, F_FULLFSYNC) == 0) return 0;
+    return ::fsync(fd);  // fall back if the fs doesn't support F_FULLFSYNC
+#elif defined(__linux__)
+    return ::fdatasync(fd);
+#else
+    return ::fsync(fd);
+#endif
+}
+
 }  // namespace
 
 struct Store::Impl {
@@ -107,7 +121,7 @@ std::unique_ptr<Store> Store::create(const std::string& path, const StoreHeader&
     if (!pwrite_all(fd, h, kHeaderSize, 0) ||
         !write_sb(fd, kSbAOff, 1, 0, 0, key) ||
         !write_sb(fd, kSbBOff, 0, 0, 0, key) ||
-        ::fdatasync(fd) != 0) {
+        durable_sync(fd) != 0) {
         ::close(fd);
         ::unlink(path.c_str());
         return nullptr;
@@ -196,7 +210,7 @@ bool Store::commit(uint64_t root_offset, uint64_t root_len, const uint8_t key[kK
     // 1) data (blobs + manifest, already appended) must hit disk before the SB
     //    that references it — otherwise a crash could leave the SB pointing at
     //    bytes that never landed.
-    if (::fdatasync(impl_->fd) != 0) return false;
+    if (durable_sync(impl_->fd) != 0) return false;
     // 2) write the *inactive* superblock with seq+1.
     const int next_slot = impl_->active_slot ^ 1;
     const uint64_t pos = next_slot == 0 ? kSbAOff : kSbBOff;
@@ -204,7 +218,7 @@ bool Store::commit(uint64_t root_offset, uint64_t root_len, const uint8_t key[kK
     if (!write_sb(impl_->fd, pos, next_seq, root_offset, root_len, key)) return false;
     // 3) the commit point: once this fsync returns, the new SB is durable and
     //    becomes active on the next open; before it, the old SB still wins.
-    if (::fdatasync(impl_->fd) != 0) return false;
+    if (durable_sync(impl_->fd) != 0) return false;
 
     impl_->seq = next_seq;
     impl_->active_slot = next_slot;
