@@ -21,6 +21,9 @@
 
 using sealpack::Pack;
 
+// defined in cli/web.cpp
+int run_web(Pack* pack, const std::string& pack_path, const std::string& host, int port);
+
 static std::string password() {
     const char* e = ::getenv("SEALPACK_PASSWORD");
     return e ? std::string(e) : std::string();
@@ -52,7 +55,8 @@ static int usage() {
         "  rm      <pack> <path>\n"
         "  mv      <pack> <from> <to>\n"
         "  cp      <pack> <from> <to>\n"
-        "  compact <pack>\n");
+        "  compact <pack>\n"
+        "  web     <pack> [port]        file-manager UI in the browser (default 8777)\n");
     return 2;
 }
 
@@ -75,6 +79,10 @@ int main(int argc, char** argv) {
     auto pk = Pack::open(pack, pw);
     if (!pk) { std::fprintf(stderr, "open failed (wrong password or missing file)\n"); return 1; }
 
+    if (cmd == "web") {
+        const int port = (argc >= 4) ? std::atoi(argv[3]) : 8777;
+        return run_web(pk.get(), pack, "127.0.0.1", port);
+    }
     if (cmd == "add" && argc == 5) {
         std::string data;
         if (!read_file(argv[4], &data)) { std::fprintf(stderr, "read %s failed\n", argv[4]); return 1; }

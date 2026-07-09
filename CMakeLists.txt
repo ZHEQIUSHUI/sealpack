@@ -28,9 +28,12 @@ target_include_directories(sealpack
 target_link_libraries(sealpack PRIVATE monocypher)
 target_compile_options(sealpack PRIVATE -Wall -Wextra)
 
-# ---- CLI --------------------------------------------------------------------
-add_executable(sealpack-cli cli/main.cpp)
+# ---- CLI (with the `web` file-manager UI) -----------------------------------
+add_executable(sealpack-cli cli/main.cpp cli/web.cpp)
 target_link_libraries(sealpack-cli PRIVATE sealpack)
+target_include_directories(sealpack-cli PRIVATE ${CMAKE_SOURCE_DIR}/third_party/httplib)
+find_package(Threads REQUIRED)
+target_link_libraries(sealpack-cli PRIVATE Threads::Threads)
 set_target_properties(sealpack-cli PROPERTIES OUTPUT_NAME sealpack)
 
 # ---- tests: one per module, each its own ctest ------------------------------
