@@ -19,7 +19,8 @@ one file, encrypted, deduplicated, and safe across power loss.
 | | |
 |---|---|
 | **Single file** | header + append-only blobs + manifest + dual superblock |
-| **Encrypted** | `password → Argon2id → XChaCha20-Poly1305`. No password, no plaintext; no backdoor, no recovery key |
+| **Encrypted** | random master key + XChaCha20-Poly1305; each password wraps the master key via Argon2id. No password, no plaintext; no backdoor, no recovery key |
+| **Key slots** | up to 8 passwords open one pack (LUKS-style). `rekey`/`addkey`/`rmkey` rewrite an 88B slot — blobs never move, so rotation is instant on a multi-GB pack |
 | **Deduplicated** | content-addressed (BLAKE2b): identical bytes stored once; `move`/`copy` are O(1) |
 | **Crash-safe** | append-only + atomic double-superblock commit — a power loss leaves the old state or the new one, never half-written |
 | **Two APIs** | C++ `Pack` class (core) + C ABI (`sealpack.h`) wrapper for FFI |
@@ -56,25 +57,47 @@ sealpack add     models.sealpack yolo/v2.axmodel model.bin
 sealpack cp      models.sealpack yolo/v2.axmodel backup/v2.axmodel   # 0 extra bytes
 sealpack ls      models.sealpack
 sealpack get     models.sealpack yolo/v2.axmodel out.bin
+sealpack web     models.sealpack                         # browser file-manager (+ Keys panel)
+
+# passwords / key slots
+sealpack keys    models.sealpack                         # how many slots are in use
+SEALPACK_NEW_PASSWORD=… sealpack rekey  models.sealpack  # change this password
+SEALPACK_NEW_PASSWORD=… sealpack addkey models.sealpack  # add another password
+sealpack rmkey   models.sealpack 1                       # revoke slot 1
 ```
 
 ## On-disk format
 
 ```
-0    Header       "SEALPACK" + version + Argon2 salt/params (plaintext; salt is public)
-40   Superblock A ┐ 64B each, AEAD-encrypted {seq, manifest_off, manifest_len}.
-104  Superblock B ┘ active = larger seq with a valid MAC.
-168  Data region  append-only: encrypted blobs + encrypted manifests (nonce|mac|cipher)
+0    Header       "SEALPACK" + version + Argon2 params (plaintext)
+24   KeySlot[8]   88B each: salt + AEAD-wrapped master key. Empty slot = all-zero salt
+728  Superblock A ┐ 64B each, AEAD{seq, manifest_off, manifest_len} under the master key.
+792  Superblock B ┘ active = larger seq with a valid MAC.
+856  Data region  append-only: encrypted blobs + encrypted manifests (nonce|mac|cipher)
 ```
 
 ## Encryption — safe even with the source public
 
-The only secret is the password. On disk there's just the salt (public), the
-KDF parameters, ciphertext, and MACs. `password + salt → Argon2id → key` (key
-lives only in memory, wiped after use). Security rests on the key, not on hiding
-the algorithm (Kerckhoffs's principle), so publishing this source changes
-nothing — and every brute-force guess must pay a full Argon2id (memory-hard)
-run. A wrong password derives a wrong key → the AEAD MAC fails → open is refused.
+The data is encrypted under a **random master key**, never a password directly.
+Each password only *wraps* that master key into one of 8 key slots:
+`password + slot salt → Argon2id → key-encryption key → wrap(master key)`. On
+disk there's just the public salts, KDF parameters, ciphertext, and MACs — no
+secret at rest. Security rests on the master key, not on hiding the algorithm
+(Kerckhoffs's principle), so publishing this source changes nothing, and every
+brute-force guess must pay a full Argon2id (memory-hard) run. A wrong password
+unwraps to garbage → the AEAD MAC fails → open is refused.
+
+**Key slots — multiple passwords, instant rotation.** Because the master key is
+wrapped (not derived), up to 8 passwords can open one pack, each in its own slot:
+
+- `rekey`  — change the password in the slot you opened with (the old one stops working)
+- `addkey` — wrap the master key under another password (both now open the pack)
+- `rmkey`  — revoke a slot (never the one in use, never the last remaining)
+
+Each rewrites just an 88-byte slot — the data blobs are never re-encrypted, so
+rotating a password on a multi-GB pack is instant. An **empty password** (`""`)
+is accepted but wraps the key under a public salt only, i.e. anyone can open it —
+use it solely for deliberately unprotected/public packs.
 
 ## Crash safety
 
