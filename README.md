@@ -50,20 +50,26 @@ sealpack_free(out);
 sealpack_close(sp);
 ```
 
-**CLI** (password from `$SEALPACK_PASSWORD`)
+**CLI** — an interactive shell: open once, type the password once, then run
+commands against the still-open pack (one Argon2 unlock for the whole session).
 ```bash
-sealpack create  models.sealpack
-sealpack add     models.sealpack yolo/v2.axmodel model.bin
-sealpack cp      models.sealpack yolo/v2.axmodel backup/v2.axmodel   # 0 extra bytes
-sealpack ls      models.sealpack
-sealpack get     models.sealpack yolo/v2.axmodel out.bin
-sealpack web     models.sealpack                         # browser file-manager (+ Keys panel)
-
-# passwords / key slots
-sealpack keys    models.sealpack                         # how many slots are in use
-SEALPACK_NEW_PASSWORD=… sealpack rekey  models.sealpack  # change this password
-SEALPACK_NEW_PASSWORD=… sealpack addkey models.sealpack  # add another password
-sealpack rmkey   models.sealpack 1                       # revoke slot 1
+sealpack models.sealpack          # prompts for the password, then a mini shell:
+  sealpack> ls
+  sealpack> add cfg/x.json /tmp/x.json
+  sealpack> get yolo/v2.axmodel out.bin
+  sealpack> rekey                 # change the password (asks the new one twice)
+  sealpack> addkey                # add another password that also opens the pack
+  sealpack> rmkey 1               # revoke a slot
+  sealpack> keys
+  sealpack> quit
+```
+One-shot subcommands remain for scripting — they prompt for the password on a
+terminal, or read `$SEALPACK_PASSWORD` when there's no TTY (CI):
+```bash
+sealpack create models.sealpack                     # prompts for a new password twice
+sealpack ls     models.sealpack
+sealpack add    models.sealpack yolo/v2.axmodel model.bin
+sealpack web    models.sealpack                     # browser file-manager (+ Keys panel)
 ```
 
 ## On-disk format
