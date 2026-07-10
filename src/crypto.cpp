@@ -11,8 +11,8 @@ extern "C" {
 #include <fcntl.h>
 #include <unistd.h>
 #if defined(__linux__)
-#include <sys/random.h>
-#endif
+#include <sys/syscall.h>   // SYS_getrandom — the libc getrandom() wrapper isn't
+#endif                     // declared on old Android NDK API levels; the syscall is
 
 namespace sealpack {
 
@@ -59,12 +59,13 @@ void content_hash(uint8_t hash[kHashBytes], const uint8_t* data, size_t n) {
 }
 
 int random_bytes(uint8_t* buf, size_t n) {
-#if defined(__linux__)
-    {
+#if defined(__linux__) && defined(SYS_getrandom)
+    {   // syscall directly: the getrandom() libc wrapper isn't declared on old
+        // Android NDK (API < 28), but the syscall exists on any Linux 3.17+ kernel.
         size_t off = 0;
         while (off < n) {
-            ssize_t r = getrandom(buf + off, n - off, 0);
-            if (r < 0) { if (errno == EINTR) continue; break; }  // fall through
+            ssize_t r = syscall(SYS_getrandom, buf + off, n - off, 0);
+            if (r < 0) { if (errno == EINTR) continue; break; }  // fall through to /dev/urandom
             off += static_cast<size_t>(r);
         }
         if (off == n) return 0;
