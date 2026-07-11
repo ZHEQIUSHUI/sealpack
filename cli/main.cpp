@@ -27,14 +27,13 @@
 #include <string>
 #include <vector>
 
-#include <sys/wait.h>
-#include <termios.h>
-#include <unistd.h>
-
+#include "platform.hpp"   // tty / no-echo password / editor — POSIX+Windows
 #include "preview.hpp"
 #include "sealpack.hpp"
 
 using sealpack::Pack;
+using sealpack_cli::read_password;
+using sealpack_cli::edit_in_editor;
 
 // defined in cli/web.cpp
 int run_web(Pack* pack, const std::string& pack_path, const std::string& host, int port);
@@ -55,25 +54,6 @@ static bool write_file(const char* path, const std::string& data) {
     return f.good();
 }
 
-// Read one line from stdin, echo off if it's a terminal (so the password
-// doesn't show or land in scrollback). On a pipe it just reads a line, which
-// keeps scripting/CI working.
-static std::string read_password(const char* prompt) {
-    std::fprintf(stderr, "%s", prompt);
-    std::fflush(stderr);
-    const bool tty = ::isatty(STDIN_FILENO);
-    termios old{};
-    if (tty) {
-        ::tcgetattr(STDIN_FILENO, &old);
-        termios ne = old; ne.c_lflag = static_cast<tcflag_t>(ne.c_lflag & ~ECHO);
-        ::tcsetattr(STDIN_FILENO, TCSANOW, &ne);
-    }
-    std::string pw;
-    std::getline(std::cin, pw);
-    if (tty) { ::tcsetattr(STDIN_FILENO, TCSANOW, &old); std::fprintf(stderr, "\n"); }
-    return pw;
-}
-
 static std::vector<std::string> tokenize(const std::string& s) {
     std::vector<std::string> t; std::istringstream is(s); std::string w;
     while (is >> w) t.push_back(w);
@@ -90,41 +70,6 @@ static std::string human_size(uint64_t n) {
     char buf[32];
     std::snprintf(buf, sizeof buf, i == 0 ? "%.0f %s" : "%.1f %s", v, u[i]);
     return buf;
-}
-
-// Open `data` in $VISUAL/$EDITOR (default vi) via a temp file, returning the
-// edited bytes in *out. Keeps the original extension so the editor picks the
-// right syntax mode. The temp file is 0600 (mkstemp) and removed after.
-static bool edit_in_editor(const std::string& name_hint, const std::string& data,
-                           std::string* out) {
-    std::string ext;
-    const auto dot = name_hint.find_last_of('.'), slash = name_hint.find_last_of('/');
-    if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
-        ext = name_hint.substr(dot);
-    std::string tmpl = "/tmp/sealpack-edit-XXXXXX" + ext;
-    std::vector<char> t(tmpl.begin(), tmpl.end()); t.push_back('\0');
-    const int fd = ext.empty() ? ::mkstemp(t.data())
-                               : ::mkstemps(t.data(), static_cast<int>(ext.size()));
-    if (fd < 0) { std::perror("mkstemp"); return false; }
-    const std::string path(t.data());
-    const bool wrote = ::write(fd, data.data(), data.size()) == static_cast<ssize_t>(data.size());
-    ::close(fd);
-    bool ok = false;
-    if (wrote) {
-        const char* ed = ::getenv("VISUAL");
-        if (!ed || !*ed) ed = ::getenv("EDITOR");
-        if (!ed || !*ed) ed = "vi";
-        const std::string cmd = std::string(ed) + " '" + path + "'";
-        // Only read the file back if the editor actually exited cleanly.
-        // system() returns -1 when the child can't be spawned, otherwise a wait
-        // status: a crashed editor, or a deliberate abort (vi `:cq` exits non-
-        // zero), must NOT write a possibly-truncated buffer back into the pack.
-        const int rc = ::system(cmd.c_str());
-        if (rc != -1 && WIFEXITED(rc) && WEXITSTATUS(rc) == 0)
-            ok = read_file(path.c_str(), out);
-    }
-    ::unlink(path.c_str());
-    return ok;
 }
 
 // ---- command execution (shared by the shell and one-shot mode) --------------
@@ -151,7 +96,7 @@ static int do_command(Pack* pk, const std::vector<std::string>& a) {
             std::fprintf(stderr, "wrote %s (%zu bytes)\n", a[2].c_str(), data.size());
             return 0;
         }
-        if (::isatty(STDOUT_FILENO)) {  // don't spew a binary model into the terminal
+        if (sealpack_cli::stdout_is_tty()) {  // don't spew a binary model into the terminal
             std::fprintf(stderr, "refusing to dump binary to the terminal — give an outfile: get %s <outfile>\n", a[1].c_str());
             return 1;
         }
@@ -171,7 +116,7 @@ static int do_command(Pack* pk, const std::vector<std::string>& a) {
         return 0;
     }
     if (c == "edit" && a.size() == 2) {
-        if (!::isatty(STDIN_FILENO)) { std::fprintf(stderr, "edit: needs a terminal\n"); return 1; }
+        if (!sealpack_cli::stdin_is_tty()) { std::fprintf(stderr, "edit: needs a terminal\n"); return 1; }
         std::string data;
         if (!pk->get(a[1], &data)) { std::fprintf(stderr, "not found: %s\n", a[1].c_str()); return 1; }
         if (!sealpack_preview::looks_text(data)) {
@@ -251,7 +196,7 @@ static int shell(Pack* pk, const std::string& pack_path) {
     std::fprintf(stderr, "opened %s — 'help' for commands, 'quit' to exit.\n", pack_path.c_str());
     std::string line;
     while (true) {
-        if (::isatty(STDIN_FILENO)) { std::fprintf(stderr, "sealpack> "); std::fflush(stderr); }
+        if (sealpack_cli::stdin_is_tty()) { std::fprintf(stderr, "sealpack> "); std::fflush(stderr); }
         if (!std::getline(std::cin, line)) { std::fprintf(stderr, "\n"); break; }  // Ctrl-D
         const auto a = tokenize(line);
         if (a.empty()) continue;
@@ -284,7 +229,7 @@ static int usage() {
 
 // Password for one-shot mode: prompt on a terminal, else $SEALPACK_PASSWORD.
 static bool batch_password(std::string* out) {
-    if (::isatty(STDIN_FILENO)) { *out = read_password("password: "); return true; }
+    if (sealpack_cli::stdin_is_tty()) { *out = read_password("password: "); return true; }
     const char* e = ::getenv("SEALPACK_PASSWORD");
     if (!e) { std::fprintf(stderr, "no terminal: set $SEALPACK_PASSWORD\n"); return false; }
     *out = e;

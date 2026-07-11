@@ -1,17 +1,18 @@
 #include "check.hpp"
 #include "store.hpp"
 
+#include <cstdio>   // std::remove — portable unlink
 #include <cstring>
 #include <string>
 
-#include <unistd.h>
-
 using namespace sealpack;
 
-static const char* kPath = "/tmp/sealpack_test_store.sealpack";
+// Relative to the test's working dir (the build tree), so it's portable to
+// Windows too — a hardcoded /tmp path doesn't exist there.
+static const char* kPath = "sealpack_test_store.spk";
 
 TEST_MAIN("store") {
-    ::unlink(kPath);
+    std::remove(kPath);
 
     // Store now works in terms of a random master key (Pack wraps it per
     // password). The test drives the master key directly.
@@ -100,5 +101,5 @@ TEST_MAIN("store") {
         CHECK(st == nullptr);
     }
 
-    ::unlink(kPath);
+    std::remove(kPath);
 }

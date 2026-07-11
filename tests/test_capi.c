@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "sealpack.h"
 
@@ -14,8 +13,8 @@ static int checks = 0, fails = 0;
     } while (0)
 
 int main(void) {
-    const char* path = "/tmp/sealpack_test_capi.sealpack";
-    unlink(path);
+    const char* path = "sealpack_test_capi.spk";
+    remove(path);
 
     sealpack_t* sp = sealpack_create(path, "hunter2");
     CHECK(sp != NULL);
@@ -58,7 +57,7 @@ int main(void) {
     sealpack_free(out);
     sealpack_close(sp);
 
-    unlink(path);
+    remove(path);
     fprintf(stderr, "[capi] %d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;
 }

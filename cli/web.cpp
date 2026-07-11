@@ -7,10 +7,10 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
 #include <mutex>
 #include <string>
 
+#include "crypto.hpp"   // sealpack::random_bytes — the OS CSPRNG (portable)
 #include "httplib.h"
 #include "preview.hpp"
 #include "sealpack.hpp"
@@ -19,10 +19,12 @@ using sealpack::Pack;
 
 namespace {
 
+// Per-start CSRF token from the OS CSPRNG. Returns "" on RNG failure so the
+// caller refuses to start — a predictable token would defeat the guard. (Was a
+// bare /dev/urandom read with no failure check, which is also non-portable.)
 std::string gen_token() {
-    unsigned char b[16] = {0};
-    std::ifstream u("/dev/urandom", std::ios::binary);
-    u.read(reinterpret_cast<char*>(b), sizeof b);
+    unsigned char b[16];
+    if (sealpack::random_bytes(b, sizeof b) != 0) return std::string();
     static const char* hex = "0123456789abcdef";
     std::string s;
     for (unsigned char c : b) { s += hex[c >> 4]; s += hex[c & 0xf]; }
@@ -267,6 +269,7 @@ int run_web(Pack* pack, const std::string& pack_path,
             const std::string& host, int port) {
     std::mutex mu;
     const std::string token = gen_token();
+    if (token.empty()) { std::fprintf(stderr, "sealpack web: RNG failed, refusing to start\n"); return 1; }
     httplib::Server srv;
 
     auto authed = [&](const httplib::Request& req) {

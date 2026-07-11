@@ -44,17 +44,27 @@ if(NOT MSVC)
 endif()
 
 # ---- CLI (with the `web` file-manager UI) -----------------------------------
-# The CLI still uses POSIX-only facilities (termios password echo, mkstemp, the
-# editor spawn via sys/wait). The CORE LIBRARY is portable (os:: seam), so on
-# Windows we build+test the library only; the CLI Windows port is a follow-up.
-if(NOT WIN32)
-    add_executable(sealpack-cli cli/main.cpp cli/web.cpp)
-    target_link_libraries(sealpack-cli PRIVATE sealpack)
-    target_include_directories(sealpack-cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/httplib)
-    find_package(Threads REQUIRED)
-    target_link_libraries(sealpack-cli PRIVATE Threads::Threads)
-    set_target_properties(sealpack-cli PROPERTIES OUTPUT_NAME sealpack)
+# Console/editor specifics sit behind the cli/platform.hpp shim (backends
+# platform_posix.cpp / platform_win32.cpp), so the CLI builds on all three OSes.
+# httplib is header-only and cross-platform (needs ws2_32 on Windows). The CLI
+# reaches into src/ for sealpack::random_bytes (the web CSRF token).
+if(WIN32)
+    set(SEALPACK_CLI_PLATFORM cli/platform_win32.cpp)
+else()
+    set(SEALPACK_CLI_PLATFORM cli/platform_posix.cpp)
 endif()
+
+add_executable(sealpack-cli cli/main.cpp cli/web.cpp ${SEALPACK_CLI_PLATFORM})
+target_link_libraries(sealpack-cli PRIVATE sealpack)
+target_include_directories(sealpack-cli PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/httplib
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+find_package(Threads REQUIRED)
+target_link_libraries(sealpack-cli PRIVATE Threads::Threads)
+if(WIN32)
+    target_link_libraries(sealpack-cli PRIVATE ws2_32)   # httplib sockets
+endif()
+set_target_properties(sealpack-cli PROPERTIES OUTPUT_NAME sealpack)
 
 # ---- tests: one per module, each its own ctest ------------------------------
 option(SEALPACK_BUILD_TESTS "Build unit tests" ON)

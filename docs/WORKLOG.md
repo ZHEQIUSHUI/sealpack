@@ -6,6 +6,39 @@ reference). Commit hashes are on `ZHEQIUSHUI/sealpack`.
 
 ---
 
+## 2026-07-12 — cross-platform, part 2: CLI/web on Windows + test portability
+
+Follow-up to the core-library port. Now the **whole tool** (lib + CLI + web)
+builds and tests on Linux/macOS/Windows.
+
+- **What broke first.** The `windows-latest` CI (added the day before) failed —
+  but note the *core library* compiled clean on real MSVC; only the **test
+  files** and the (then-gated) CLI didn't. The tests `#include <unistd.h>`
+  (absent on MSVC), used `::unlink`, and hardcoded `/tmp/...` paths that don't
+  exist on Windows. My wine cross-check had missed it because mingw *has*
+  `unistd.h`.
+- **`cli/platform.hpp` shim.** Extracted the CLI's console/editor specifics
+  (tty detection, no-echo password, `$EDITOR` on a temp file) behind a seam:
+  `platform_posix.cpp` (termios / `mkstemp` / `system`+`sys/wait`) and
+  `platform_win32.cpp` (`SetConsoleMode` / `GetTempFileNameW` / `_wsystem`,
+  default editor `notepad`). main.cpp lost its `termios`/`unistd`/`sys/wait`
+  includes. Folded in two review nits while here: the edit temp file now prefers
+  `$XDG_RUNTIME_DIR` (private tmpfs, not world-readable `/tmp`), and web's
+  `gen_token` uses `sealpack::random_bytes` with a failure check (was a bare,
+  non-portable `/dev/urandom` read that silently yielded a zero token on error).
+- **Tests made portable.** Dropped `<unistd.h>`, `::unlink`→`std::remove`,
+  `/tmp/...`→CWD-relative `*.spk`.
+- **CMake/CI.** CLI now builds on all platforms (shim backend picked by `WIN32`,
+  `ws2_32` linked for httplib, `src/` on the include path for `random_bytes`).
+- **Validation.** mingw-w64 (posix-thread variant — the default win32-thread one
+  lacks `std::thread`, which httplib needs; not an MSVC issue) cross-compiled the
+  full CLI + web zero-warning, and under wine64 the whole one-shot surface round-
+  trips (create/add/ls/cat/stat/get/mv/cp/compact + wrong-password reject) and
+  all 6 core tests pass with the new relative paths. `windows-latest` on real
+  MSVC is the final gate.
+
+---
+
 ## 2026-07-11 — cross-platform: os:: seam + Windows core-library backend
 
 Branch `feat/cross-platform` (stacked on the hardening branch). macOS/Linux were

@@ -1,16 +1,16 @@
 #include "check.hpp"
 #include "sealpack.hpp"
 
+#include <cstdio>   // std::remove — portable unlink
 #include <string>
-
-#include <unistd.h>
 
 using namespace sealpack;
 
-static const char* kPath = "/tmp/sealpack_test_pack.sealpack";
+// CWD-relative so it's portable to Windows (no /tmp there).
+static const char* kPath = "sealpack_test_pack.spk";
 
 TEST_MAIN("pack") {
-    ::unlink(kPath);
+    std::remove(kPath);
 
     // ---- create, put (with dedup), commit ----
     {
@@ -108,12 +108,12 @@ TEST_MAIN("pack") {
         CHECK(got == "MODEL-B-V2");                        // blobs intact — rekey only rewrote the slot
     }
 
-    ::unlink(kPath);
+    std::remove(kPath);
 
     // ---- empty password: allowed, but protects nothing ----
     {
-        const char* kEmpty = "/tmp/sealpack_test_empty.sealpack";
-        ::unlink(kEmpty);
+        const char* kEmpty = "sealpack_test_empty.spk";
+        std::remove(kEmpty);
         auto pk = Pack::create(kEmpty, "");
         CHECK(pk != nullptr);
         CHECK(pk->put("m", std::string("X")));
@@ -127,6 +127,6 @@ TEST_MAIN("pack") {
         CHECK(got == "X");
         ro.reset();
         CHECK(Pack::open(kEmpty, "not-empty") == nullptr);  // a non-empty pw does NOT
-        ::unlink(kEmpty);
+        std::remove(kEmpty);
     }
 }

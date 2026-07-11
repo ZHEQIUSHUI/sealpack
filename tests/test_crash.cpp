@@ -1,10 +1,9 @@
 #include "check.hpp"
 #include "sealpack.hpp"
 
+#include <cstdio>   // std::remove — portable unlink
 #include <fstream>
 #include <string>
-
-#include <unistd.h>
 
 using namespace sealpack;
 
@@ -15,7 +14,7 @@ static constexpr long kSbA = 728;
 static constexpr long kSbB = 792;
 static constexpr long kSbSize = 64;
 
-static const char* kPath = "/tmp/sealpack_test_crash.sealpack";
+static const char* kPath = "sealpack_test_crash.spk";
 
 // Overwrite `len` bytes at `off` with 0xFF — simulates a torn/garbage write.
 static void corrupt(long off, long len) {
@@ -37,7 +36,7 @@ static void patch_u32(long off, uint32_t v) {
 // Build a pack committed twice: S1 has {A}, S2 has {A,B}. The two commits land
 // in alternating superblock slots, so exactly one slot holds each state.
 static void build_two_commits() {
-    ::unlink(kPath);
+    std::remove(kPath);
     auto pk = Pack::create(kPath, "pw");
     pk->put("A", std::string("aaa"));
     pk->commit();  // S1: {A}
@@ -120,5 +119,5 @@ TEST_MAIN("crash") {
     patch_u32(12, 1);                 // nb_blocks < 8*nb_lanes (monocypher minimum)
     CHECK(Pack::open(kPath, "pw") == nullptr);
 
-    ::unlink(kPath);
+    std::remove(kPath);
 }

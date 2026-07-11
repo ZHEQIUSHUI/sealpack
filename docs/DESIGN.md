@@ -49,14 +49,16 @@ capi     extern "C" wrapper over Pack (opaque handle) for non-C++ hosts.
 ```
 
 CLI/UI sits on top (in `cli/`, only linked into the `sealpack` executable — the
-core library never touches HTTP or a terminal). **CLI is POSIX-only for now**
-(termios password echo, `mkstemp`, editor spawn via `sys/wait`); on Windows only
-the core library builds (see §14). Porting the CLI is the tracked follow-up.
+core library never touches HTTP or a terminal). Cross-platform on all three OSes;
+the console/editor specifics sit behind the `cli/platform.hpp` shim (§14).
 
 ```
-cli/main.cpp     arg parsing, interactive shell, one-shot commands, password I/O
-cli/web.cpp      `sealpack web` — localhost file-manager UI + REST API
-cli/preview.hpp  shared text-vs-binary sniffing + MIME guess (cat + web preview)
+cli/main.cpp          arg parsing, interactive shell, one-shot commands
+cli/web.cpp           `sealpack web` — localhost file-manager UI + REST API
+cli/preview.hpp       shared text-vs-binary sniffing + MIME guess (cat + web)
+cli/platform.hpp      console/editor seam: tty, no-echo password, $EDITOR launch
+  platform_posix.cpp    termios / mkstemp / system+sys/wait
+  platform_win32.cpp    SetConsoleMode / GetTempFileNameW / _wsystem
 ```
 
 Public headers: `include/sealpack.hpp` (C++ `Pack`) and `include/sealpack.h`
@@ -280,12 +282,17 @@ The CLI binary is `build/sealpack` (target `sealpack-cli`,
   `8·nb_lanes ≤ nb_blocks ≤ 4 GiB`) — a crafted `nb_lanes=0` divided-by-zero in
   monocypher (SIGFPE on `open`, pre-auth). Any new plaintext-header field must be
   range-checked there before it reaches crypto.
-- **`edit` only writes back on a clean editor exit** (`WIFEXITED && WEXITSTATUS==0`).
-  A crash or a deliberate `:cq` abort must not persist a truncated buffer.
+- **`edit` only writes back on a clean editor exit** (`WIFEXITED && WEXITSTATUS==0`
+  / a 0 return from `_wsystem` on Windows). A crash or a deliberate `:cq` abort
+  must not persist a truncated buffer.
 - **All OS calls in the core go through `os::`** (`src/os.hpp`). Don't reintroduce
   a raw `::open`/`::pread`/`std::rename` in store/pack — add it to the seam so
   both backends stay in sync. Keep os_posix.cpp and os_win32.cpp semantically
   identical (the ctest suite is the cross-backend contract).
+- **CLI terminal/editor calls go through `cli/platform.hpp`.** No `termios` /
+  `isatty` / `mkstemp` / `sys/wait` directly in `main.cpp`/`web.cpp` — route them
+  through the shim so Windows keeps building. Same for tests: no `<unistd.h>`,
+  `std::remove` over `::unlink`, CWD-relative pack paths (§14).
 - **The 8 key slots are load-bearing format, not a feature.** Single-password is
   the product decision; keep the array on disk.
 
@@ -293,9 +300,6 @@ The CLI binary is `build/sealpack` (target `sealpack-cli`,
 
 ## 13. Known gaps / TODO (for the maintenance session)
 
-- **CLI/web are POSIX-only** — the Windows port of `cli/` (password echo via
-  `SetConsoleMode`, temp files, editor spawn, httplib is already cross-platform)
-  is the next portability step. Core library is done (§14).
 - Only slot 0 is used; multi-password was intentionally cut. If it ever comes
   back, `addkey`/`rmkey` + slot notes/labels were the sketched design.
 - `web` has no auth beyond the session token and no TLS (localhost only by
@@ -312,11 +316,11 @@ The CLI binary is `build/sealpack` (target `sealpack-cli`,
 
 ## 14. Portability (Linux / macOS / Windows)
 
-Goal: the **core library** (`crypto` `index` `os` `store` `pack` `capi`) builds
-and passes the full ctest suite on all three. macOS/Linux also build the CLI +
-web UI; Windows builds the library only (CLI port pending).
+Goal: the **whole tool** (core library + CLI + web UI) builds and the full ctest
+suite passes on Linux, macOS, and Windows. Two seams isolate the OS specifics;
+everything else is portable C++17.
 
-- **The seam is `src/os.hpp`.** Everything OS-specific the core touches — file
+- **Core I/O seam: `src/os.hpp`.** Everything OS-specific the core touches — file
   open/read/write/sync/rename/remove + wall-clock — is declared there and
   implemented once per platform:
   - `os_posix.cpp` — Linux/macOS/Android. `open(O_CLOEXEC)`, `pread`/`pwrite`,
@@ -325,6 +329,14 @@ web UI; Windows builds the library only (CLI port pending).
     `WriteFile` with `OVERLAPPED` for positional I/O, `FlushFileBuffers` (the
     durability barrier), `MoveFileExW(REPLACE_EXISTING|WRITE_THROUGH)`. Paths are
     widened UTF-8 → UTF-16.
+- **CLI console/editor seam: `cli/platform.hpp`.** tty detection, no-echo
+  password entry, and `$EDITOR` launch on a temp file — `platform_posix.cpp`
+  (termios / `mkstemp` / `system`+`sys/wait`) vs `platform_win32.cpp`
+  (`SetConsoleMode` / `GetTempFileNameW` / `_wsystem`). httplib is header-only and
+  already cross-platform (link `ws2_32` on Windows).
+- **Tests must stay portable** — no `<unistd.h>`, use `std::remove` not
+  `::unlink`, and CWD-relative pack paths (a hardcoded `/tmp/...` doesn't exist on
+  Windows). ctest runs in the build tree, so relative paths are fine.
 - **RNG is the other seam**, inside `crypto.cpp`: `getrandom`/`/dev/urandom` on
   POSIX, `BCryptGenRandom` on Windows (link `bcrypt`).
 - **CMake** picks the backend by `WIN32`, links `bcrypt` on Windows, and skips
