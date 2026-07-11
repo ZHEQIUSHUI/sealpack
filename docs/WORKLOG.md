@@ -6,6 +6,36 @@ reference). Commit hashes are on `ZHEQIUSHUI/sealpack`.
 
 ---
 
+## 2026-07-11 — hardening: untrusted-pack DoS, web XSS, edit write-back
+
+One PR (`harden/untrusted-pack-and-web-xss`) fixing three issues found in a
+code-review pass. Threat model: a `.spk` is a *distributed* artifact, so
+"someone hands you a hostile pack" is in scope.
+
+- **crafted KDF params → SIGFPE on open (pre-auth).** The plaintext header's
+  Argon2 params reach `derive_key` *before* the password/MAC is checked. A
+  `nb_lanes=0` divides-by-zero inside monocypher's `crypto_argon2`
+  (`monocypher.c:752`) → the process crashes on open — including any host that
+  embeds sealpack via the C API (e.g. the runtime loading a `.spk`). Fix:
+  `read_header_kdf` now range-checks the params and `open` returns nullptr
+  cleanly. Regression: 4 crafted-header cases in `test_crash`.
+- **stored XSS in `sealpack web`.** `render()` string-interpolated pack file/dir
+  names into `innerHTML` and into `onclick` JS-string literals, so a pack with a
+  name like `<img src=x onerror=…>.txt` ran arbitrary JS in a same-origin page
+  that holds the API token. Rewrote the front-end row/crumb/preview construction
+  to `textContent` + `addEventListener` closures (no interpolation reaches an
+  HTML/JS sink). Verified the payload never lands in any `innerHTML`.
+- **`edit` wrote back on a failed editor.** `system() != -1` only catches
+  spawn failure; a crashed editor or a `:cq` abort (non-zero exit) still got
+  its temp file read back and committed — persisting a possibly-truncated
+  buffer. Now gated on `WIFEXITED && WEXITSTATUS==0`.
+
+Note for later: the `web` layer still has **no automated test target** (ctest
+covers core + capi only), so the XSS fix rests on review + a manual smoke test.
+A headless-browser test would be the way to lock it down.
+
+---
+
 ## 2026-07-11 — human-readable read/edit (`cat` + `edit`, web preview + edit)
 
 - **`60d85bd` cat + web inline preview.** Added `cli/preview.hpp` (shared

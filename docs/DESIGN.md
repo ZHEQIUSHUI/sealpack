@@ -265,6 +265,18 @@ The CLI binary is `build/sealpack` (target `sealpack-cli`,
   model into a terminal or an editor is the failure mode we're guarding.
 - **Web is localhost + token only.** Don't add a bind-address option that
   defaults to `0.0.0.0`, and don't render pack-controlled HTML/SVG.
+- **Pack-controlled strings are untrusted in the web UI.** File/dir names and
+  paths come from a `.spk` that may be hostile. The front-end builds every row
+  with `textContent` + `addEventListener` closures — **never** string-interpolate
+  a pack name into `innerHTML` or an inline `on*="…"` handler (that was a stored
+  XSS). `esc()` is only for our own server messages.
+- **The plaintext header is parsed before authentication.** `read_header_kdf`
+  validates the Argon2 params (`nb_lanes` ≥ 1, `nb_passes` ≥ 1,
+  `8·nb_lanes ≤ nb_blocks ≤ 4 GiB`) — a crafted `nb_lanes=0` divided-by-zero in
+  monocypher (SIGFPE on `open`, pre-auth). Any new plaintext-header field must be
+  range-checked there before it reaches crypto.
+- **`edit` only writes back on a clean editor exit** (`WIFEXITED && WEXITSTATUS==0`).
+  A crash or a deliberate `:cq` abort must not persist a truncated buffer.
 - **The 8 key slots are load-bearing format, not a feature.** Single-password is
   the product decision; keep the array on disk.
 
