@@ -8,11 +8,16 @@ extern "C" {
 #include "monocypher.h"
 }
 
+#if defined(_WIN32)
+#include <windows.h>
+#include <bcrypt.h>        // BCryptGenRandom — the OS CSPRNG on Windows
+#else
 #include <fcntl.h>
 #include <unistd.h>
 #if defined(__linux__)
 #include <sys/syscall.h>   // SYS_getrandom — the libc getrandom() wrapper isn't
 #endif                     // declared on old Android NDK API levels; the syscall is
+#endif
 
 namespace sealpack {
 
@@ -59,6 +64,12 @@ void content_hash(uint8_t hash[kHashBytes], const uint8_t* data, size_t n) {
 }
 
 int random_bytes(uint8_t* buf, size_t n) {
+#if defined(_WIN32)
+    // BCRYPT_USE_SYSTEM_PREFERRED_RNG: no algorithm handle needed. Returns an
+    // NTSTATUS; >= 0 (STATUS_SUCCESS) is success. This is the OS CSPRNG.
+    return BCryptGenRandom(nullptr, buf, static_cast<ULONG>(n),
+                           BCRYPT_USE_SYSTEM_PREFERRED_RNG) >= 0 ? 0 : -1;
+#else
 #if defined(__linux__) && defined(SYS_getrandom)
     {   // syscall directly: the getrandom() libc wrapper isn't declared on old
         // Android NDK (API < 28), but the syscall exists on any Linux 3.17+ kernel.
@@ -85,6 +96,7 @@ int random_bytes(uint8_t* buf, size_t n) {
     }
     ::close(fd);
     return 0;
+#endif  // _WIN32
 }
 
 int ct_equal(const uint8_t* a, const uint8_t* b, size_t n) {

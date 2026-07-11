@@ -15,18 +15,33 @@ add_library(monocypher STATIC third_party/monocypher/monocypher.c)
 target_include_directories(monocypher PUBLIC third_party/monocypher)
 
 # ---- sealpack core library --------------------------------------------------
+# The OS-specific file I/O + RNG live behind the os:: seam (src/os.hpp); pick the
+# backend for this platform. Everything else in the core is portable C++17.
+if(WIN32)
+    set(SEALPACK_OS_BACKEND src/os_win32.cpp)
+else()
+    set(SEALPACK_OS_BACKEND src/os_posix.cpp)
+endif()
+
 add_library(sealpack STATIC
     src/crypto.cpp
     src/index.cpp
     src/store.cpp
     src/pack.cpp
     src/capi.cpp
+    ${SEALPACK_OS_BACKEND}
 )
 target_include_directories(sealpack
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(sealpack PRIVATE monocypher)
-target_compile_options(sealpack PRIVATE -Wall -Wextra)
+if(WIN32)
+    target_link_libraries(sealpack PRIVATE bcrypt)   # BCryptGenRandom (OS CSPRNG)
+endif()
+# MSVC lacks -Wall/-Wextra semantics; only pass them to GCC/Clang.
+if(NOT MSVC)
+    target_compile_options(sealpack PRIVATE -Wall -Wextra)
+endif()
 
 # ---- CLI (with the `web` file-manager UI) -----------------------------------
 add_executable(sealpack-cli cli/main.cpp cli/web.cpp)

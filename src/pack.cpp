@@ -1,20 +1,17 @@
 #include "sealpack.hpp"
 
-#include <cstdio>
 #include <cstring>
-#include <ctime>
-
-#include <unistd.h>
 
 #include "crypto.hpp"
 #include "index.hpp"
+#include "os.hpp"
 #include "sealpack.h"  // status codes shared with the C API
 #include "store.hpp"
 
 namespace sealpack {
 namespace {
 
-uint64_t now_sec() { return static_cast<uint64_t>(::time(nullptr)); }
+uint64_t now_sec() { return os::now_seconds(); }
 
 // A stored record = nonce | mac | ciphertext. So enc_size = 40 + plain_size.
 constexpr size_t kRecOverhead = kNonceBytes + kMacBytes;
@@ -295,7 +292,7 @@ bool Pack::commit() {
 bool Pack::compact() {
     Impl& im = *impl_;
     const std::string tmp = im.path + ".compact.tmp";
-    ::unlink(tmp.c_str());
+    os::remove_file(tmp.c_str());
 
     auto ns = Store::create(tmp, im.key, im.store->kdf());  // same master key, fresh file
     if (!ns) { im.last_err = SEALPACK_ERR_IO; return false; }
@@ -324,7 +321,7 @@ bool Pack::compact() {
     ns.reset();          // close the new file
     im.store.reset();    // close the old file
 
-    if (std::rename(tmp.c_str(), im.path.c_str()) != 0) {  // atomic replace
+    if (!os::rename_replace(tmp.c_str(), im.path.c_str())) {  // atomic replace
         im.last_err = SEALPACK_ERR_IO; return false;
     }
     auto reopened = Store::open(im.path, im.key);
