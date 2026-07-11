@@ -151,14 +151,31 @@ std::unique_ptr<Store> Store::create(const std::string& path,
     return st;
 }
 
+// The header (magic, version, Argon2 params) is PLAINTEXT and is consumed by
+// derive_key() BEFORE any password/MAC check — so a crafted or corrupt pack's
+// params reach monocypher unauthenticated. Reject degenerate values here:
+// nb_lanes==0 divides-by-zero in crypto_argon2 (SIGFPE on open), and an absurd
+// nb_blocks would ask derive_key for a multi-TB work area. This is the single
+// choke point for both open() and read_meta(), so validating once covers both.
+constexpr uint32_t kMaxKdfLanes  = 64;         // single-threaded anyway; bound it
+constexpr uint32_t kMaxKdfBlocks = 1u << 22;   // 4 GiB work area ceiling (default is 64 MiB)
+
 static bool read_header_kdf(int fd, KdfParams* kdf) {
     uint8_t h[kHeaderSize];
     if (!pread_all(fd, h, kHeaderSize, 0) || std::memcmp(h, "SEALPACK", 8) != 0 ||
         dec_u32(h + 8) != kVersion)
         return false;
-    kdf->nb_blocks = dec_u32(h + 12);
-    kdf->nb_passes = dec_u32(h + 16);
-    kdf->nb_lanes  = dec_u32(h + 20);
+    const uint32_t nb_blocks = dec_u32(h + 12);
+    const uint32_t nb_passes = dec_u32(h + 16);
+    const uint32_t nb_lanes  = dec_u32(h + 20);
+    if (nb_lanes == 0 || nb_lanes > kMaxKdfLanes ||   // 0 → divide-by-zero in argon2
+        nb_passes == 0 ||
+        nb_blocks < 8u * nb_lanes ||                  // monocypher's stated minimum
+        nb_blocks > kMaxKdfBlocks)                    // cap the work-area allocation
+        return false;
+    kdf->nb_blocks = nb_blocks;
+    kdf->nb_passes = nb_passes;
+    kdf->nb_lanes  = nb_lanes;
     return true;
 }
 

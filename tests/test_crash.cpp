@@ -25,6 +25,15 @@ static void corrupt(long off, long len) {
     f.write(junk.data(), len);
 }
 
+// Overwrite a little-endian u32 at `off` (header field patcher).
+static void patch_u32(long off, uint32_t v) {
+    std::fstream f(kPath, std::ios::in | std::ios::out | std::ios::binary);
+    unsigned char b[4] = {static_cast<unsigned char>(v), static_cast<unsigned char>(v >> 8),
+                          static_cast<unsigned char>(v >> 16), static_cast<unsigned char>(v >> 24)};
+    f.seekp(off);
+    f.write(reinterpret_cast<char*>(b), 4);
+}
+
 // Build a pack committed twice: S1 has {A}, S2 has {A,B}. The two commits land
 // in alternating superblock slots, so exactly one slot holds each state.
 static void build_two_commits() {
@@ -88,6 +97,28 @@ TEST_MAIN("crash") {
         CHECK(pk->get("B", &got));
         CHECK(got == "bbb");
     }
+
+    // ---- crafted KDF params: the plaintext header is parsed BEFORE the
+    // password is checked, so a hostile pack's Argon2 params reach the KDF
+    // unauthenticated. nb_lanes==0 used to divide-by-zero in argon2 (SIGFPE on
+    // open); an absurd nb_blocks would ask for a multi-TB work area. Open must
+    // reject the pack cleanly (nullptr), never crash. Header layout (store.cpp):
+    // magic(8) version(4)@8 nb_blocks(4)@12 nb_passes(4)@16 nb_lanes(4)@20.
+    build_two_commits();
+    patch_u32(20, 0);                 // nb_lanes = 0  → was SIGFPE
+    CHECK(Pack::open(kPath, "pw") == nullptr);
+
+    build_two_commits();
+    patch_u32(16, 0);                 // nb_passes = 0
+    CHECK(Pack::open(kPath, "pw") == nullptr);
+
+    build_two_commits();
+    patch_u32(12, 0xFFFFFFFFu);       // nb_blocks = 4G blocks → 4 TiB work area
+    CHECK(Pack::open(kPath, "pw") == nullptr);
+
+    build_two_commits();
+    patch_u32(12, 1);                 // nb_blocks < 8*nb_lanes (monocypher minimum)
+    CHECK(Pack::open(kPath, "pw") == nullptr);
 
     ::unlink(kPath);
 }
