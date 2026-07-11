@@ -8,6 +8,10 @@ password.
 **Zero external dependencies** — [monocypher](https://monocypher.org) is
 vendored (two files), so `git clone && cmake` just works, on device too.
 
+> Maintaining sealpack? See [`docs/DESIGN.md`](docs/DESIGN.md) (architecture,
+> on-disk format, invariants & gotchas) and [`docs/WORKLOG.md`](docs/WORKLOG.md)
+> (what changed and why).
+
 ## Why
 
 Shipping an encrypted bundle of models/files that gets updated over time.
