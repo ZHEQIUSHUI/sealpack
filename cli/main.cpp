@@ -91,6 +91,35 @@ static std::string human_size(uint64_t n) {
     return buf;
 }
 
+// Open `data` in $VISUAL/$EDITOR (default vi) via a temp file, returning the
+// edited bytes in *out. Keeps the original extension so the editor picks the
+// right syntax mode. The temp file is 0600 (mkstemp) and removed after.
+static bool edit_in_editor(const std::string& name_hint, const std::string& data,
+                           std::string* out) {
+    std::string ext;
+    const auto dot = name_hint.find_last_of('.'), slash = name_hint.find_last_of('/');
+    if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
+        ext = name_hint.substr(dot);
+    std::string tmpl = "/tmp/sealpack-edit-XXXXXX" + ext;
+    std::vector<char> t(tmpl.begin(), tmpl.end()); t.push_back('\0');
+    const int fd = ext.empty() ? ::mkstemp(t.data())
+                               : ::mkstemps(t.data(), static_cast<int>(ext.size()));
+    if (fd < 0) { std::perror("mkstemp"); return false; }
+    const std::string path(t.data());
+    const bool wrote = ::write(fd, data.data(), data.size()) == static_cast<ssize_t>(data.size());
+    ::close(fd);
+    bool ok = false;
+    if (wrote) {
+        const char* ed = ::getenv("VISUAL");
+        if (!ed || !*ed) ed = ::getenv("EDITOR");
+        if (!ed || !*ed) ed = "vi";
+        const std::string cmd = std::string(ed) + " '" + path + "'";
+        if (::system(cmd.c_str()) != -1) ok = read_file(path.c_str(), out);
+    }
+    ::unlink(path.c_str());
+    return ok;
+}
+
 // ---- command execution (shared by the shell and one-shot mode) --------------
 
 // Run one command against an already-open pack. Prints its own errors; returns
@@ -132,6 +161,21 @@ static int do_command(Pack* pk, const std::vector<std::string>& a) {
         }
         std::fwrite(data.data(), 1, data.size(), stdout);
         if (!data.empty() && data.back() != '\n') std::fputc('\n', stdout);
+        return 0;
+    }
+    if (c == "edit" && a.size() == 2) {
+        if (!::isatty(STDIN_FILENO)) { std::fprintf(stderr, "edit: needs a terminal\n"); return 1; }
+        std::string data;
+        if (!pk->get(a[1], &data)) { std::fprintf(stderr, "not found: %s\n", a[1].c_str()); return 1; }
+        if (!sealpack_preview::looks_text(data)) {
+            std::fprintf(stderr, "edit: %s looks binary — refusing (use get/add)\n", a[1].c_str());
+            return 1;
+        }
+        std::string edited;
+        if (!edit_in_editor(a[1], data, &edited)) { std::fprintf(stderr, "edit: editor failed\n"); return 1; }
+        if (edited == data) { std::fprintf(stderr, "unchanged\n"); return 0; }
+        if (!pk->put(a[1], edited) || !pk->commit()) { std::fprintf(stderr, "edit: write-back failed\n"); return 1; }
+        std::fprintf(stderr, "updated %s (%s)\n", a[1].c_str(), human_size(edited.size()).c_str());
         return 0;
     }
     if (c == "add" && a.size() == 3) {
@@ -184,6 +228,7 @@ static void shell_help() {
         "  ls [prefix]           list files (optionally under a path prefix)\n"
         "  get <path> [outfile]  extract a file\n"
         "  cat <path>            print a text file (refuses binary)\n"
+        "  edit <path>           edit a text file in $EDITOR (vi), save back\n"
         "  add <path> <file>     add / overwrite from a local file\n"
         "  rm <path>             remove\n"
         "  mv <from> <to>        rename / move\n"
@@ -213,7 +258,7 @@ static int shell(Pack* pk, const std::string& pack_path) {
 // ---- entry ------------------------------------------------------------------
 
 static bool is_command(const std::string& s) {
-    static const char* k[] = {"create","add","get","cat","ls","rm","mv","cp","stat",
+    static const char* k[] = {"create","add","get","cat","edit","ls","rm","mv","cp","stat",
                               "compact","rekey","web"};
     for (auto c : k) if (s == c) return true;
     return false;
@@ -224,8 +269,8 @@ static int usage() {
         "usage:\n"
         "  sealpack <pack>               open + interactive shell (prompts for password)\n"
         "  sealpack create <pack>        create a new pack (prompts for password twice)\n"
-        "  sealpack <cmd> <pack> [args]  one-shot: ls/add/get/cat/rm/mv/cp/stat/\n"
-        "                                compact/rekey; or  web <pack> [port]\n"
+        "  sealpack <cmd> <pack> [args]  one-shot: ls/add/get/cat/edit/rm/mv/cp/\n"
+        "                                stat/compact/rekey; or  web <pack> [port]\n"
         "  one-shot prompts for the password on a terminal, else uses $SEALPACK_PASSWORD\n");
     return 2;
 }

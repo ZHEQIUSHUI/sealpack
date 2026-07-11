@@ -89,15 +89,19 @@ const char* kIndexHtml = R"HTML(<!doctype html>
  .keys input{width:200px} .keys .row{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end}
  .keys .msg{margin-top:8px;font-size:12px;min-height:15px}
  .keys .msg.ok{color:#5ac47d} .keys .msg.err{color:#e06c6c}
- .ov{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:9}
- .ov.on{display:flex}
- .modal{background:#12151c;border:1px solid var(--line);border-radius:10px;width:min(900px,92vw);max-height:88vh;display:flex;flex-direction:column}
- .modal header{border-bottom:1px solid var(--line);border-radius:10px 10px 0 0}
- .modal .body{padding:0;overflow:auto}
- .modal pre{margin:0;padding:14px 16px;white-space:pre-wrap;word-break:break-word;font:12.5px/1.5 ui-monospace,Menlo,Consolas,monospace}
- .modal img{display:block;max-width:100%;margin:0 auto;background:#0a0c10}
- .modal .note{padding:26px 16px;color:var(--mut);text-align:center}
- .x{margin-left:auto;cursor:pointer;background:none;border:none;color:var(--mut);font-size:18px}
+ .panel{position:fixed;top:0;right:0;width:min(560px,50vw);height:100vh;background:#12151c;border-left:1px solid var(--line);display:none;flex-direction:column;z-index:9;box-shadow:-8px 0 24px rgba(0,0,0,.35)}
+ .panel.on{display:flex}
+ .panel>header{border-bottom:1px solid var(--line)}
+ .panel .path{font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;color:var(--mut);word-break:break-all}
+ .tools{display:flex;gap:6px;padding:8px 14px;border-bottom:1px solid var(--line);align-items:center}
+ .tools .sp{margin-left:auto}
+ .pbody{flex:1;overflow:auto;min-height:0}
+ .pbody pre{margin:0;padding:14px 16px;white-space:pre-wrap;word-break:break-word;font:12.5px/1.5 ui-monospace,Menlo,Consolas,monospace}
+ .pbody textarea{display:block;width:100%;height:100%;border:0;outline:none;resize:none;background:#0d0f14;color:var(--fg);padding:14px 16px;font:12.5px/1.5 ui-monospace,Menlo,Consolas,monospace}
+ .pbody img{display:block;max-width:100%;margin:0 auto;background:#0a0c10}
+ .pbody .note{padding:26px 16px;color:var(--mut);text-align:center}
+ .msg{font-size:12px;padding:0 4px} .msg.ok{color:#5ac47d} .msg.err{color:#e06c6c}
+ .x{cursor:pointer;background:none;border:none;color:var(--mut);font-size:18px}
 </style></head>
 <body>
 <header><b>sealpack</b><span class="mut">file manager</span>
@@ -124,12 +128,11 @@ const char* kIndexHtml = R"HTML(<!doctype html>
  <tbody id="rows"></tbody></table>
  <div class="empty" id="empty" style="display:none">empty folder</div>
 </main>
-<div class="ov" id="ov" onclick="if(event.target===this)closePv()">
- <div class="modal">
-   <header><b id="pv_name">preview</b>
-     <button class="x" onclick="closePv()">&#10005;</button></header>
-   <div class="body" id="pv_body"></div>
- </div>
+<div class="panel" id="panel">
+ <header><b class="path" id="pv_name">preview</b>
+   <button class="x" onclick="closePv()" style="margin-left:auto">&#10005;</button></header>
+ <div class="tools" id="pv_tools"></div>
+ <div class="pbody" id="pv_body"></div>
 </div>
 <script>
 const TOKEN="%%TOKEN%%";
@@ -174,20 +177,44 @@ function render(){
 function go(dir){cwd=dir;render()}
 function dl(p){window.location="/api/get?t="+TOKEN+"&path="+encodeURIComponent(p)}
 function esc(s){return s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]))}
-function closePv(){document.getElementById("ov").classList.remove("on");document.getElementById("pv_body").innerHTML=""}
-async function pv(p){
- const body=document.getElementById("pv_body");
- document.getElementById("pv_name").textContent=p;
- body.innerHTML='<div class="note">loading&hellip;</div>';
- document.getElementById("ov").classList.add("on");
- const r=await fetch("/api/view?path="+encodeURIComponent(p),{headers:H});
- if(r.status===415){body.innerHTML='<div class="note">binary file — not previewable.<br><br><button class="acc" onclick="dl(\''+p+'\')">&#8595; Download</button></div>';return}
- if(!r.ok){body.innerHTML='<div class="note">'+esc(await r.text())+'</div>';return}
- const ct=r.headers.get("Content-Type")||"";
- if(ct.indexOf("image/")===0){const b=await r.blob();body.innerHTML='<img src="'+URL.createObjectURL(b)+'">'}
- else{const t=await r.text();body.innerHTML='<pre></pre>';body.firstChild.textContent=t}
+// ---- right-side preview / edit panel ----
+let pvPath=null,pvText=null,pvEditable=false,pvEditing=false;
+function pvBody(){return document.getElementById("pv_body")}
+function closePv(){document.getElementById("panel").classList.remove("on");pvPath=null;pvEditing=false;pvBody().innerHTML=""}
+function pvTools(){
+ const t=document.getElementById("pv_tools");
+ if(!pvPath){t.innerHTML="";return}
+ let h="";
+ if(pvEditable&&!pvEditing)h+='<button class="acc" onclick="pvEdit()">&#9998; Edit</button>';
+ if(pvEditing)h+='<button class="acc" onclick="pvSave()">Save</button><button onclick="pvView()">Cancel</button>';
+ h+='<span class="sp"></span><span class="msg" id="pv_msg"></span>'+
+    '<button onclick="dl(\''+pvPath+'\')" title="download">&#8595;</button>';
+ t.innerHTML=h;
 }
-document.addEventListener("keydown",e=>{if(e.key==="Escape")closePv()});
+async function pv(p){
+ pvPath=p;pvEditing=false;pvEditable=false;pvText=null;
+ document.getElementById("pv_name").textContent=p;
+ document.getElementById("panel").classList.add("on");
+ const body=pvBody();body.innerHTML='<div class="note">loading&hellip;</div>';pvTools();
+ const r=await fetch("/api/view?path="+encodeURIComponent(p),{headers:H});
+ if(r.status===415){body.innerHTML='<div class="note">binary file — not previewable.<br><br><button class="acc" onclick="dl(\''+p+'\')">&#8595; Download</button></div>';pvTools();return}
+ if(!r.ok){body.innerHTML='<div class="note">'+esc(await r.text())+'</div>';pvTools();return}
+ const ct=r.headers.get("Content-Type")||"";
+ if(ct.indexOf("image/")===0){const b=await r.blob();body.innerHTML="";const im=document.createElement("img");im.src=URL.createObjectURL(b);body.appendChild(im);pvTools();return}
+ pvText=await r.text();
+ pvEditable=r.headers.get("X-Sealpack-Truncated")!=="1";   // too big → view only
+ pvView();
+}
+function pvView(){pvEditing=false;const b=pvBody();b.innerHTML='<pre></pre>';b.firstChild.textContent=pvText;pvTools()}
+function pvEdit(){pvEditing=true;const b=pvBody();b.innerHTML='<textarea id="pv_ta" spellcheck="false"></textarea>';const ta=document.getElementById("pv_ta");ta.value=pvText;pvTools();ta.focus()}
+async function pvSave(){
+ const nt=document.getElementById("pv_ta").value;
+ const r=await fetch("/api/put?path="+encodeURIComponent(pvPath),{method:"POST",headers:H,body:nt});
+ const m=document.getElementById("pv_msg");
+ if(r.ok){pvText=nt;pvView();const m2=document.getElementById("pv_msg");if(m2){m2.className="msg ok";m2.textContent="saved"}refresh()}
+ else if(m){m.className="msg err";m.textContent="save failed: "+esc(await r.text())}
+}
+document.addEventListener("keydown",e=>{if(e.key==="Escape"&&!pvEditing)closePv()});
 async function upload(){
  const f=document.getElementById("file").files[0];let name=document.getElementById("dest").value.trim();
  if(!f){alert("pick a file first");return}
@@ -285,6 +312,7 @@ int run_web(Pack* pack, const std::string& pack_path,
                     std::to_string(data.size()) + " bytes total, download for the full file]";
                 data.resize(kCap);
                 data += note;
+                res.set_header("X-Sealpack-Truncated", "1");   // UI: view-only, editing would truncate
             }
             res.set_header("Content-Disposition", "inline");
             res.set_content(data, m ? m : "text/plain; charset=utf-8");
