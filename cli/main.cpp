@@ -27,6 +27,7 @@
 #include <string>
 #include <vector>
 
+#include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -114,7 +115,13 @@ static bool edit_in_editor(const std::string& name_hint, const std::string& data
         if (!ed || !*ed) ed = ::getenv("EDITOR");
         if (!ed || !*ed) ed = "vi";
         const std::string cmd = std::string(ed) + " '" + path + "'";
-        if (::system(cmd.c_str()) != -1) ok = read_file(path.c_str(), out);
+        // Only read the file back if the editor actually exited cleanly.
+        // system() returns -1 when the child can't be spawned, otherwise a wait
+        // status: a crashed editor, or a deliberate abort (vi `:cq` exits non-
+        // zero), must NOT write a possibly-truncated buffer back into the pack.
+        const int rc = ::system(cmd.c_str());
+        if (rc != -1 && WIFEXITED(rc) && WEXITSTATUS(rc) == 0)
+            ok = read_file(path.c_str(), out);
     }
     ::unlink(path.c_str());
     return ok;
