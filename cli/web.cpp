@@ -142,11 +142,22 @@ let ALL=[];     // full path list from the server
 function fmtSize(n){if(n<1024)return n+" B";let u=["KB","MB","GB"],i=-1;do{n/=1024;i++}while(n>=1024&&i<2);return n.toFixed(1)+" "+u[i]}
 function fmtTime(s){if(!s)return"";return new Date(s*1000).toLocaleString()}
 async function refresh(){const r=await fetch("/api/list",{headers:H});ALL=await r.json();render()}
+// Everything below builds the DOM with textContent + addEventListener rather
+// than string-interpolated innerHTML: a pack's file/dir names are UNTRUSTED
+// (the .spk may come from anyone), so they must never reach innerHTML or an
+// inline on*="..." handler. textContent can't inject HTML; a closure can't
+// inject JS. Keep it that way — see docs/DESIGN.md §8.
+function td(cls){const e=document.createElement("td");if(cls)e.className=cls;return e}
+function btn(text,title,fn,cls){const b=document.createElement("button");b.textContent=text;if(title)b.title=title;if(cls)b.className=cls;b.onclick=fn;return b}
 function render(){
- const cb=document.getElementById("crumb");
- let html='<a onclick="go(String())">root</a>';let acc="";
- for(const seg of cwd.split("/").filter(Boolean)){acc+=seg+"/";html+=' <span>/</span> <a onclick="go(\''+acc+'\')">'+seg+'</a>'}
- cb.innerHTML=html;
+ const cb=document.getElementById("crumb");cb.textContent="";
+ const root=document.createElement("a");root.textContent="root";root.onclick=()=>go("");cb.appendChild(root);
+ let acc="";
+ for(const seg of cwd.split("/").filter(Boolean)){
+   acc+=seg+"/";const here=acc;
+   const sep=document.createElement("span");sep.textContent=" / ";cb.appendChild(sep);
+   const a=document.createElement("a");a.textContent=seg;a.onclick=()=>go(here);cb.appendChild(a);
+ }
  const dirs=new Map(),files=[];
  for(const it of ALL){
    if(!it.path.startsWith(cwd))continue;
@@ -154,23 +165,29 @@ function render(){
    if(i===-1)files.push({name:rest,size:it.size,mtime:it.mtime,path:it.path});
    else{const d=rest.slice(0,i);dirs.set(d,(dirs.get(d)||0)+1)}
  }
- const rows=document.getElementById("rows");rows.innerHTML="";
- for(const [d,cnt] of [...dirs.keys()].sort().map(k=>[k,dirs.get(k)])){
-   const tr=document.createElement("tr");tr.className="dir";
-   tr.innerHTML='<td><span class="ico">&#128193;</span><span class="name" onclick="go(\''+cwd+d+'/\')">'+d+'</span></td>'+
-     '<td class="sz">'+cnt+' item'+(cnt>1?'s':'')+'</td><td class="mt"></td><td class="act"></td>';
-   rows.appendChild(tr);
+ const rows=document.getElementById("rows");rows.textContent="";
+ for(const d of [...dirs.keys()].sort()){
+   const cnt=dirs.get(d);const tr=document.createElement("tr");tr.className="dir";
+   const t=td();const ico=document.createElement("span");ico.className="ico";ico.textContent=String.fromCodePoint(128193);
+   const nm=document.createElement("span");nm.className="name";nm.textContent=d;nm.onclick=()=>go(cwd+d+"/");
+   t.appendChild(ico);t.appendChild(nm);tr.appendChild(t);
+   const sz=td("sz");sz.textContent=cnt+" item"+(cnt>1?"s":"");tr.appendChild(sz);
+   tr.appendChild(td("mt"));tr.appendChild(td("act"));rows.appendChild(tr);
  }
  for(const f of files.sort((a,b)=>a.name<b.name?-1:1)){
    const tr=document.createElement("tr");
-   tr.innerHTML='<td><span class="ico">&#128196;</span><span class="name" style="cursor:pointer" onclick="pv(\''+f.path+'\')" title="preview">'+f.name+'</span></td>'+
-     '<td class="sz">'+fmtSize(f.size)+'</td><td class="mt">'+fmtTime(f.mtime)+'</td>'+
-     '<td class="act"><button onclick="pv(\''+f.path+'\')" title="preview">&#128065;</button>'+
-     '<button onclick="dl(\''+f.path+'\')" title="download">&#8595;</button>'+
-     '<button onclick="ren(\''+f.path+'\',\''+f.name+'\')">rename</button>'+
-     '<button onclick="cp(\''+f.path+'\')">copy</button>'+
-     '<button onclick="rm(\''+f.path+'\')">&#10005;</button></td>';
-   rows.appendChild(tr);
+   const t=td();const ico=document.createElement("span");ico.className="ico";ico.textContent=String.fromCodePoint(128196);
+   const nm=document.createElement("span");nm.className="name";nm.style.cursor="pointer";nm.title="preview";nm.textContent=f.name;nm.onclick=()=>pv(f.path);
+   t.appendChild(ico);t.appendChild(nm);tr.appendChild(t);
+   const sz=td("sz");sz.textContent=fmtSize(f.size);tr.appendChild(sz);
+   const mt=td("mt");mt.textContent=fmtTime(f.mtime);tr.appendChild(mt);
+   const act=td("act");
+   act.appendChild(btn(String.fromCodePoint(128065),"preview",()=>pv(f.path)));
+   act.appendChild(btn(String.fromCodePoint(8595),"download",()=>dl(f.path)));
+   act.appendChild(btn("rename","",()=>ren(f.path,f.name)));
+   act.appendChild(btn("copy","",()=>cp(f.path)));
+   act.appendChild(btn(String.fromCodePoint(10005),"delete",()=>rm(f.path)));
+   tr.appendChild(act);rows.appendChild(tr);
  }
  document.getElementById("empty").style.display=(dirs.size||files.length)?"none":"block";
 }
@@ -184,12 +201,14 @@ function closePv(){document.getElementById("panel").classList.remove("on");pvPat
 function pvTools(){
  const t=document.getElementById("pv_tools");
  if(!pvPath){t.innerHTML="";return}
+ // Static buttons carry no pack data, so innerHTML is fine here; the download
+ // button binds the untrusted pvPath via a closure (never string-interpolated).
  let h="";
  if(pvEditable&&!pvEditing)h+='<button class="acc" onclick="pvEdit()">&#9998; Edit</button>';
  if(pvEditing)h+='<button class="acc" onclick="pvSave()">Save</button><button onclick="pvView()">Cancel</button>';
- h+='<span class="sp"></span><span class="msg" id="pv_msg"></span>'+
-    '<button onclick="dl(\''+pvPath+'\')" title="download">&#8595;</button>';
+ h+='<span class="sp"></span><span class="msg" id="pv_msg"></span>';
  t.innerHTML=h;
+ t.appendChild(btn(String.fromCodePoint(8595),"download",()=>dl(pvPath)));
 }
 async function pv(p){
  pvPath=p;pvEditing=false;pvEditable=false;pvText=null;
@@ -197,7 +216,7 @@ async function pv(p){
  document.getElementById("panel").classList.add("on");
  const body=pvBody();body.innerHTML='<div class="note">loading&hellip;</div>';pvTools();
  const r=await fetch("/api/view?path="+encodeURIComponent(p),{headers:H});
- if(r.status===415){body.innerHTML='<div class="note">binary file — not previewable.<br><br><button class="acc" onclick="dl(\''+p+'\')">&#8595; Download</button></div>';pvTools();return}
+ if(r.status===415){body.textContent="";const nt=document.createElement("div");nt.className="note";nt.appendChild(document.createTextNode("binary file — not previewable."));nt.appendChild(document.createElement("br"));nt.appendChild(document.createElement("br"));nt.appendChild(btn(String.fromCodePoint(8595)+" Download","",()=>dl(p),"acc"));body.appendChild(nt);pvTools();return}
  if(!r.ok){body.innerHTML='<div class="note">'+esc(await r.text())+'</div>';pvTools();return}
  const ct=r.headers.get("Content-Type")||"";
  if(ct.indexOf("image/")===0){const b=await r.blob();body.innerHTML="";const im=document.createElement("img");im.src=URL.createObjectURL(b);body.appendChild(im);pvTools();return}
