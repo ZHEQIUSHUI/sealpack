@@ -38,15 +38,20 @@ crypto   monocypher wrapper: derive_key (Argon2id), AEAD (XChaCha20-Poly1305),
          BLAKE2b-256 content hash, OS RNG. No hand-rolled crypto — ever.
 index    in-memory manifest: blobs[] (hash→offset/len) + paths[] (path→hash,
          +mtime). serialize/parse. normalize_path() rejects `..` escapes.
+os       platform seam (os.hpp): file open/pread/pwrite/sync/rename/remove +
+         now_seconds, behind one interface. Backends: os_posix.cpp (Linux/macOS/
+         Android) and os_win32.cpp (Windows). store/pack call only os::.
 store    on-disk file layout + I/O: header, key slots, double superblock,
-         append-only data region, atomic commit (durable_sync).
+         append-only data region, atomic commit (sync via os::sync_file).
 pack     the Pack class — ties crypto+index+store together. CRUD, move/copy
          (O(1), CAS), compact, rekey, verify_password. This is the core API.
 capi     extern "C" wrapper over Pack (opaque handle) for non-C++ hosts.
 ```
 
 CLI/UI sits on top (in `cli/`, only linked into the `sealpack` executable — the
-core library never touches HTTP or a terminal):
+core library never touches HTTP or a terminal). **CLI is POSIX-only for now**
+(termios password echo, `mkstemp`, editor spawn via `sys/wait`); on Windows only
+the core library builds (see §14). Porting the CLI is the tracked follow-up.
 
 ```
 cli/main.cpp     arg parsing, interactive shell, one-shot commands, password I/O
@@ -277,6 +282,10 @@ The CLI binary is `build/sealpack` (target `sealpack-cli`,
   range-checked there before it reaches crypto.
 - **`edit` only writes back on a clean editor exit** (`WIFEXITED && WEXITSTATUS==0`).
   A crash or a deliberate `:cq` abort must not persist a truncated buffer.
+- **All OS calls in the core go through `os::`** (`src/os.hpp`). Don't reintroduce
+  a raw `::open`/`::pread`/`std::rename` in store/pack — add it to the seam so
+  both backends stay in sync. Keep os_posix.cpp and os_win32.cpp semantically
+  identical (the ctest suite is the cross-backend contract).
 - **The 8 key slots are load-bearing format, not a feature.** Single-password is
   the product decision; keep the array on disk.
 
@@ -284,6 +293,9 @@ The CLI binary is `build/sealpack` (target `sealpack-cli`,
 
 ## 13. Known gaps / TODO (for the maintenance session)
 
+- **CLI/web are POSIX-only** — the Windows port of `cli/` (password echo via
+  `SetConsoleMode`, temp files, editor spawn, httplib is already cross-platform)
+  is the next portability step. Core library is done (§14).
 - Only slot 0 is used; multi-password was intentionally cut. If it ever comes
   back, `addkey`/`rmkey` + slot notes/labels were the sketched design.
 - `web` has no auth beyond the session token and no TLS (localhost only by
@@ -295,3 +307,31 @@ The CLI binary is `build/sealpack` (target `sealpack-cli`,
   wins (the pack mutex serializes the writes, but there's no conflict detection).
 - `looks_text` is a heuristic; a UTF-16/BOM text file reads as binary. Add BOM
   sniffing if that comes up.
+
+---
+
+## 14. Portability (Linux / macOS / Windows)
+
+Goal: the **core library** (`crypto` `index` `os` `store` `pack` `capi`) builds
+and passes the full ctest suite on all three. macOS/Linux also build the CLI +
+web UI; Windows builds the library only (CLI port pending).
+
+- **The seam is `src/os.hpp`.** Everything OS-specific the core touches — file
+  open/read/write/sync/rename/remove + wall-clock — is declared there and
+  implemented once per platform:
+  - `os_posix.cpp` — Linux/macOS/Android. `open(O_CLOEXEC)`, `pread`/`pwrite`,
+    `fdatasync`/`F_FULLFSYNC`, `rename`, `unlink`.
+  - `os_win32.cpp` — Windows. `CreateFileW` (non-inheritable), `ReadFile`/
+    `WriteFile` with `OVERLAPPED` for positional I/O, `FlushFileBuffers` (the
+    durability barrier), `MoveFileExW(REPLACE_EXISTING|WRITE_THROUGH)`. Paths are
+    widened UTF-8 → UTF-16.
+- **RNG is the other seam**, inside `crypto.cpp`: `getrandom`/`/dev/urandom` on
+  POSIX, `BCryptGenRandom` on Windows (link `bcrypt`).
+- **CMake** picks the backend by `WIN32`, links `bcrypt` on Windows, and skips
+  `-Wall/-Wextra` on MSVC. The CLI target is guarded `if(NOT WIN32)`.
+- **CI** (`.github/workflows/ci.yml`) runs ubuntu + macos + windows. Windows uses
+  MSVC's multi-config generator, so build/test pass `--config`/`-C Release`.
+- **Local Windows check without a Windows box**: cross-compile with mingw-w64
+  (`x86_64-w64-mingw32-g++`) and run the test exes under `wine64`. This is how
+  the Win32 backend was first validated; CI's `windows-latest` is the real-MSVC
+  confirmation. Note mingw ≠ MSVC — CI catches MSVC-only issues.

@@ -6,6 +6,36 @@ reference). Commit hashes are on `ZHEQIUSHUI/sealpack`.
 
 ---
 
+## 2026-07-11 — cross-platform: os:: seam + Windows core-library backend
+
+Branch `feat/cross-platform` (stacked on the hardening branch). macOS/Linux were
+already supported; this adds **Windows for the core library**.
+
+- **`refactor(core)` — the `os::` seam.** Pulled every OS-specific file call the
+  core made (`open`/`pread`/`pwrite`/sync/`rename`/`unlink`/size + wall-clock)
+  out of store.cpp/pack.cpp into `src/os.hpp`, implemented by `os_posix.cpp`.
+  Behavior-preserving — the 6 ctests are the regression. store.cpp already had
+  the I/O funnelled into `pread_all`/`pwrite_all`/`durable_sync`, so the seam was
+  half-there. Bonus: all opens now `O_CLOEXEC` (fixes the `web`-mode fd leak into
+  spawned editors — was flagged in the same review pass).
+- **`feat(win32)` — `os_win32.cpp` + CI.** Win32 backend: `CreateFileW`,
+  `ReadFile`/`WriteFile` with `OVERLAPPED` (positional I/O, the pread/pwrite
+  analog), `FlushFileBuffers` (durability barrier), `MoveFileExW` with
+  `REPLACE_EXISTING|WRITE_THROUGH` (atomic replace for `compact`). RNG →
+  `BCryptGenRandom` in crypto.cpp. CMake selects the backend by `WIN32` and links
+  `bcrypt`; CI matrix gains `windows-latest` (with `--config Release`).
+- **Validation without a Windows box.** Cross-compiled the core + Win32 backend
+  with mingw-w64 (zero warnings) and ran **all 6 core test suites under wine64 —
+  all pass**, including crash-recovery and the crafted-header regression. That
+  exercises the real Win32 file I/O + BCryptGenRandom. `windows-latest` in CI is
+  the real-MSVC confirmation (mingw ≠ MSVC, so CI still matters).
+- **Scope call:** the CLI/web stays POSIX-only this round (termios/`mkstemp`/
+  editor-spawn); on Windows only the library builds. The library is what the
+  runtime embeds via the C ABI, so that's the portability that matters most. CLI
+  Windows port is the tracked next step (DESIGN §13).
+
+---
+
 ## 2026-07-11 — hardening: untrusted-pack DoS, web XSS, edit write-back
 
 One PR (`harden/untrusted-pack-and-web-xss`) fixing three issues found in a

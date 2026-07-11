@@ -126,6 +126,18 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure   # crypto / index / store / pack / crash / capi
 ```
 
+## Platforms
+
+| | Core library (`Pack` + C ABI) | CLI + `web` UI |
+|---|---|---|
+| Linux / macOS | ✅ | ✅ |
+| Windows | ✅ | ⏳ (POSIX-only for now) |
+| Android / cross | ✅ | — |
+
+OS specifics sit behind one seam (`src/os.hpp`, backends `os_posix.cpp` /
+`os_win32.cpp`); the rest is portable C++17. CI builds + tests on Linux, macOS,
+and Windows. See [`docs/DESIGN.md`](docs/DESIGN.md) §14.
+
 ## License
 
 The sealpack code is BSD-3-Clause. Vendored monocypher is CC0/BSD-2 (see
