@@ -44,12 +44,17 @@ if(NOT MSVC)
 endif()
 
 # ---- CLI (with the `web` file-manager UI) -----------------------------------
-add_executable(sealpack-cli cli/main.cpp cli/web.cpp)
-target_link_libraries(sealpack-cli PRIVATE sealpack)
-target_include_directories(sealpack-cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/httplib)
-find_package(Threads REQUIRED)
-target_link_libraries(sealpack-cli PRIVATE Threads::Threads)
-set_target_properties(sealpack-cli PROPERTIES OUTPUT_NAME sealpack)
+# The CLI still uses POSIX-only facilities (termios password echo, mkstemp, the
+# editor spawn via sys/wait). The CORE LIBRARY is portable (os:: seam), so on
+# Windows we build+test the library only; the CLI Windows port is a follow-up.
+if(NOT WIN32)
+    add_executable(sealpack-cli cli/main.cpp cli/web.cpp)
+    target_link_libraries(sealpack-cli PRIVATE sealpack)
+    target_include_directories(sealpack-cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/httplib)
+    find_package(Threads REQUIRED)
+    target_link_libraries(sealpack-cli PRIVATE Threads::Threads)
+    set_target_properties(sealpack-cli PROPERTIES OUTPUT_NAME sealpack)
+endif()
 
 # ---- tests: one per module, each its own ctest ------------------------------
 option(SEALPACK_BUILD_TESTS "Build unit tests" ON)
