@@ -30,6 +30,7 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include "preview.hpp"
 #include "sealpack.hpp"
 
 using sealpack::Pack;
@@ -121,6 +122,18 @@ static int do_command(Pack* pk, const std::vector<std::string>& a) {
         std::fwrite(data.data(), 1, data.size(), stdout);
         return 0;
     }
+    if (c == "cat" && a.size() == 2) {
+        std::string data;
+        if (!pk->get(a[1], &data)) { std::fprintf(stderr, "not found: %s\n", a[1].c_str()); return 1; }
+        if (!sealpack_preview::looks_text(data)) {
+            std::fprintf(stderr, "cat: %s looks binary (%s) — use 'get %s <outfile>'\n",
+                         a[1].c_str(), human_size(data.size()).c_str(), a[1].c_str());
+            return 1;
+        }
+        std::fwrite(data.data(), 1, data.size(), stdout);
+        if (!data.empty() && data.back() != '\n') std::fputc('\n', stdout);
+        return 0;
+    }
     if (c == "add" && a.size() == 3) {
         std::string data;
         if (!read_file(a[2].c_str(), &data)) { std::fprintf(stderr, "read %s failed\n", a[2].c_str()); return 1; }
@@ -170,6 +183,7 @@ static void shell_help() {
         "commands (operate on the open pack):\n"
         "  ls [prefix]           list files (optionally under a path prefix)\n"
         "  get <path> [outfile]  extract a file\n"
+        "  cat <path>            print a text file (refuses binary)\n"
         "  add <path> <file>     add / overwrite from a local file\n"
         "  rm <path>             remove\n"
         "  mv <from> <to>        rename / move\n"
@@ -199,7 +213,7 @@ static int shell(Pack* pk, const std::string& pack_path) {
 // ---- entry ------------------------------------------------------------------
 
 static bool is_command(const std::string& s) {
-    static const char* k[] = {"create","add","get","ls","rm","mv","cp","stat",
+    static const char* k[] = {"create","add","get","cat","ls","rm","mv","cp","stat",
                               "compact","rekey","web"};
     for (auto c : k) if (s == c) return true;
     return false;
@@ -210,8 +224,8 @@ static int usage() {
         "usage:\n"
         "  sealpack <pack>               open + interactive shell (prompts for password)\n"
         "  sealpack create <pack>        create a new pack (prompts for password twice)\n"
-        "  sealpack <cmd> <pack> [args]  one-shot: ls/add/get/rm/mv/cp/stat/compact/\n"
-        "                                rekey; or  web <pack> [port]\n"
+        "  sealpack <cmd> <pack> [args]  one-shot: ls/add/get/cat/rm/mv/cp/stat/\n"
+        "                                compact/rekey; or  web <pack> [port]\n"
         "  one-shot prompts for the password on a terminal, else uses $SEALPACK_PASSWORD\n");
     return 2;
 }

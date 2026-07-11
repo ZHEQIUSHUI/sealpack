@@ -12,6 +12,7 @@
 #include <string>
 
 #include "httplib.h"
+#include "preview.hpp"
 #include "sealpack.hpp"
 
 using sealpack::Pack;
@@ -88,6 +89,15 @@ const char* kIndexHtml = R"HTML(<!doctype html>
  .keys input{width:200px} .keys .row{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end}
  .keys .msg{margin-top:8px;font-size:12px;min-height:15px}
  .keys .msg.ok{color:#5ac47d} .keys .msg.err{color:#e06c6c}
+ .ov{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:9}
+ .ov.on{display:flex}
+ .modal{background:#12151c;border:1px solid var(--line);border-radius:10px;width:min(900px,92vw);max-height:88vh;display:flex;flex-direction:column}
+ .modal header{border-bottom:1px solid var(--line);border-radius:10px 10px 0 0}
+ .modal .body{padding:0;overflow:auto}
+ .modal pre{margin:0;padding:14px 16px;white-space:pre-wrap;word-break:break-word;font:12.5px/1.5 ui-monospace,Menlo,Consolas,monospace}
+ .modal img{display:block;max-width:100%;margin:0 auto;background:#0a0c10}
+ .modal .note{padding:26px 16px;color:var(--mut);text-align:center}
+ .x{margin-left:auto;cursor:pointer;background:none;border:none;color:var(--mut);font-size:18px}
 </style></head>
 <body>
 <header><b>sealpack</b><span class="mut">file manager</span>
@@ -114,6 +124,13 @@ const char* kIndexHtml = R"HTML(<!doctype html>
  <tbody id="rows"></tbody></table>
  <div class="empty" id="empty" style="display:none">empty folder</div>
 </main>
+<div class="ov" id="ov" onclick="if(event.target===this)closePv()">
+ <div class="modal">
+   <header><b id="pv_name">preview</b>
+     <button class="x" onclick="closePv()">&#10005;</button></header>
+   <div class="body" id="pv_body"></div>
+ </div>
+</div>
 <script>
 const TOKEN="%%TOKEN%%";
 const H={"X-Sealpack-Token":TOKEN};
@@ -143,9 +160,10 @@ function render(){
  }
  for(const f of files.sort((a,b)=>a.name<b.name?-1:1)){
    const tr=document.createElement("tr");
-   tr.innerHTML='<td><span class="ico">&#128196;</span><span class="name">'+f.name+'</span></td>'+
+   tr.innerHTML='<td><span class="ico">&#128196;</span><span class="name" style="cursor:pointer" onclick="pv(\''+f.path+'\')" title="preview">'+f.name+'</span></td>'+
      '<td class="sz">'+fmtSize(f.size)+'</td><td class="mt">'+fmtTime(f.mtime)+'</td>'+
-     '<td class="act"><button onclick="dl(\''+f.path+'\')">&#8595;</button>'+
+     '<td class="act"><button onclick="pv(\''+f.path+'\')" title="preview">&#128065;</button>'+
+     '<button onclick="dl(\''+f.path+'\')" title="download">&#8595;</button>'+
      '<button onclick="ren(\''+f.path+'\',\''+f.name+'\')">rename</button>'+
      '<button onclick="cp(\''+f.path+'\')">copy</button>'+
      '<button onclick="rm(\''+f.path+'\')">&#10005;</button></td>';
@@ -155,6 +173,21 @@ function render(){
 }
 function go(dir){cwd=dir;render()}
 function dl(p){window.location="/api/get?t="+TOKEN+"&path="+encodeURIComponent(p)}
+function esc(s){return s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]))}
+function closePv(){document.getElementById("ov").classList.remove("on");document.getElementById("pv_body").innerHTML=""}
+async function pv(p){
+ const body=document.getElementById("pv_body");
+ document.getElementById("pv_name").textContent=p;
+ body.innerHTML='<div class="note">loading&hellip;</div>';
+ document.getElementById("ov").classList.add("on");
+ const r=await fetch("/api/view?path="+encodeURIComponent(p),{headers:H});
+ if(r.status===415){body.innerHTML='<div class="note">binary file — not previewable.<br><br><button class="acc" onclick="dl(\''+p+'\')">&#8595; Download</button></div>';return}
+ if(!r.ok){body.innerHTML='<div class="note">'+esc(await r.text())+'</div>';return}
+ const ct=r.headers.get("Content-Type")||"";
+ if(ct.indexOf("image/")===0){const b=await r.blob();body.innerHTML='<img src="'+URL.createObjectURL(b)+'">'}
+ else{const t=await r.text();body.innerHTML='<pre></pre>';body.firstChild.textContent=t}
+}
+document.addEventListener("keydown",e=>{if(e.key==="Escape")closePv()});
 async function upload(){
  const f=document.getElementById("file").files[0];let name=document.getElementById("dest").value.trim();
  if(!f){alert("pick a file first");return}
@@ -227,6 +260,38 @@ int run_web(Pack* pack, const std::string& pack_path,
         const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
         res.set_header("Content-Disposition", "attachment; filename=\"" + name + "\"");
         res.set_content(data, "application/octet-stream");
+    });
+
+    // Inline preview: render human-readable blobs (text / images) in the browser
+    // instead of downloading. Binary → 415 so the UI says "download instead".
+    // Text is capped so a giant log can't hang the tab; images serve whole.
+    srv.Get("/api/view", [&](const httplib::Request& req, httplib::Response& res) {
+        if (!authed(req)) { res.status = 403; return; }
+        const std::string path = req.get_param_value("path");
+        std::lock_guard<std::mutex> lk(mu);
+        std::string data;
+        if (!pack->get(path, &data)) { res.status = 404; res.set_content("not found", "text/plain"); return; }
+
+        const char* m = sealpack_preview::mime_by_ext(path);
+        if (sealpack_preview::is_image_mime(m)) {
+            res.set_header("Content-Disposition", "inline");
+            res.set_content(data, m);
+            return;
+        }
+        if (m || sealpack_preview::looks_text(data)) {   // known-text ext or sniffed text
+            const size_t kCap = 1u << 20;                // 1 MiB
+            if (data.size() > kCap) {
+                const std::string note = "\n\n[... truncated for preview — " +
+                    std::to_string(data.size()) + " bytes total, download for the full file]";
+                data.resize(kCap);
+                data += note;
+            }
+            res.set_header("Content-Disposition", "inline");
+            res.set_content(data, m ? m : "text/plain; charset=utf-8");
+            return;
+        }
+        res.status = 415;   // Unsupported Media Type
+        res.set_content("binary — not previewable", "text/plain");
     });
 
     auto commit_reply = [&](bool ok, httplib::Response& res) {
