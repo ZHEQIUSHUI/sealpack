@@ -6,6 +6,35 @@ reference). Commit hashes are on `ZHEQIUSHUI/sealpack`.
 
 ---
 
+## 2026-07-12 — shell tab completion (vendored linenoise-ng)
+
+The interactive shell was a dumb `std::getline` — no Tab, no history, no cursor
+movement. Added readline-style line editing + **Tab completion** (commands, and
+in-pack paths folder-by-folder).
+
+- **Engine choice.** Kept the zero-system-dep rule: vendored **linenoise-ng**
+  (`third_party/linenoise`, BSD) rather than depending on system readline. Chose
+  the cross-platform ng fork over antirez's original so completion works on
+  Windows too (the user asked for all three OSes). Built as its own static lib,
+  linked into the CLI only.
+- **Completion** (`completion_cb`): first token → command list; a path arg of a
+  path-taking command → `Pack::list()` paths, one folder level per Tab
+  (`cat mo`⇥→`models/`, `s`⇥→`models/sub/`). History is in-memory only (pack
+  paths shouldn't hit a history file on disk).
+- **The linenoise-ng gotcha.** Its completion callback gets only the *current
+  word* (and `/` is a break char), so it loses the command name and parent
+  folder — the first cut completed `cat m`⇥ to the command `mv`. Fixed with a
+  6-line local patch that publishes the full line-before-cursor via a new
+  `linenoiseCompletionContext()`; both sites tagged `[sealpack local patch]`,
+  documented in DESIGN §15 (must be re-applied if linenoise is re-vendored).
+- **Validation.** Drove the real shell through a pty simulating Tab keys: command
+  completion, folder-by-folder descent, deep nesting, and the ambiguous case
+  (lists `app.yaml  db.yaml`, keeps the line) all behave. Cross-compiled the CLI
+  with linenoise for Windows (mingw) and smoke-ran under wine. Adding a command
+  is now a **five**-place edit (added the completion list) — noted in §12.
+
+---
+
 ## 2026-07-12 — cross-platform, part 2: CLI/web on Windows + test portability
 
 Follow-up to the core-library port. Now the **whole tool** (lib + CLI + web)

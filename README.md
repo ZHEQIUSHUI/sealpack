@@ -5,8 +5,9 @@ atomic commits. Think "an encrypted git packfile you can add/move/delete files
 in" — one file on disk, many logical files inside, nothing readable without the
 password.
 
-**Zero external dependencies** — [monocypher](https://monocypher.org) is
-vendored (two files), so `git clone && cmake` just works, on device too.
+**Zero external/system dependencies** — everything is vendored
+([monocypher](https://monocypher.org) for crypto, cpp-httplib for the web UI,
+linenoise-ng for the shell), so `git clone && cmake` just works, on device too.
 
 > Maintaining sealpack? See [`docs/DESIGN.md`](docs/DESIGN.md) (architecture,
 > on-disk format, invariants & gotchas) and [`docs/WORKLOG.md`](docs/WORKLOG.md)
@@ -56,10 +57,12 @@ sealpack_close(sp);
 
 **CLI** — an interactive shell: open once, type the password once, then run
 commands against the still-open pack (one Argon2 unlock for the whole session).
+Tab completes commands and in-pack paths (`cat yolo/`⇥); ↑/↓ recall history.
 ```bash
 sealpack models.sealpack          # prompts for the password, then a mini shell:
   sealpack> ls
   sealpack> add cfg/x.json /tmp/x.json
+  sealpack> cat yolo/<Tab>         # completes paths inside the pack
   sealpack> get yolo/v2.axmodel out.bin
   sealpack> rekey                 # change the password (asks the new one twice)
   sealpack> quit

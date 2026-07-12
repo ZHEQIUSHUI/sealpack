@@ -14,6 +14,14 @@ endif()
 add_library(monocypher STATIC third_party/monocypher/monocypher.c)
 target_include_directories(monocypher PUBLIC third_party/monocypher)
 
+# ---- vendored linenoise-ng (CLI line editing + tab completion, all 3 OSes) ---
+# Also zero external deps; used only by the CLI shell, not the core library.
+add_library(linenoise STATIC
+    third_party/linenoise/linenoise.cpp
+    third_party/linenoise/ConvertUTF.cpp
+    third_party/linenoise/wcwidth.cpp)
+target_include_directories(linenoise PUBLIC third_party/linenoise)
+
 # ---- sealpack core library --------------------------------------------------
 # The OS-specific file I/O + RNG live behind the os:: seam (src/os.hpp); pick the
 # backend for this platform. Everything else in the core is portable C++17.
@@ -55,7 +63,7 @@ else()
 endif()
 
 add_executable(sealpack-cli cli/main.cpp cli/web.cpp ${SEALPACK_CLI_PLATFORM})
-target_link_libraries(sealpack-cli PRIVATE sealpack)
+target_link_libraries(sealpack-cli PRIVATE sealpack linenoise)
 target_include_directories(sealpack-cli PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/httplib
     ${CMAKE_CURRENT_SOURCE_DIR}/src)

@@ -53,13 +53,17 @@ core library never touches HTTP or a terminal). Cross-platform on all three OSes
 the console/editor specifics sit behind the `cli/platform.hpp` shim (§14).
 
 ```
-cli/main.cpp          arg parsing, interactive shell, one-shot commands
+cli/main.cpp          arg parsing, interactive shell (tab completion), one-shot
 cli/web.cpp           `sealpack web` — localhost file-manager UI + REST API
 cli/preview.hpp       shared text-vs-binary sniffing + MIME guess (cat + web)
 cli/platform.hpp      console/editor seam: tty, no-echo password, $EDITOR launch
   platform_posix.cpp    termios / mkstemp / system+sys/wait
   platform_win32.cpp    SetConsoleMode / GetTempFileNameW / _wsystem
 ```
+
+The shell's line editing + Tab completion come from vendored **linenoise-ng**
+(`third_party/linenoise`, BSD, cross-platform — used only by the CLI, never the
+core). See §15 for the completion design and the one local patch it needed.
 
 Public headers: `include/sealpack.hpp` (C++ `Pack`) and `include/sealpack.h`
 (C ABI). Nothing in `src/` is a public header.
@@ -267,7 +271,8 @@ The CLI binary is `build/sealpack` (target `sealpack-cli`,
   `store.cpp` constants. v1↔v2 are incompatible.
 - **macOS durability** needs `F_FULLFSYNC`, not `fsync`.
 - **Adding a CLI command** = edit `do_command` + `is_command` + `shell_help` +
-  `usage` (four places).
+  `usage` + the `kCmds[]`/`cmd_completes_paths` list in `completion_cb` (so Tab
+  completes it too) — five places now.
 - **`cat`/`edit`/web preview must refuse binary** via `looks_text` — dumping a
   model into a terminal or an editor is the failure mode we're guarding.
 - **Web is localhost + token only.** Don't add a bind-address option that
@@ -339,11 +344,40 @@ everything else is portable C++17.
   Windows). ctest runs in the build tree, so relative paths are fine.
 - **RNG is the other seam**, inside `crypto.cpp`: `getrandom`/`/dev/urandom` on
   POSIX, `BCryptGenRandom` on Windows (link `bcrypt`).
-- **CMake** picks the backend by `WIN32`, links `bcrypt` on Windows, and skips
-  `-Wall/-Wextra` on MSVC. The CLI target is guarded `if(NOT WIN32)`.
+- **CMake** picks each backend by `WIN32`, links `bcrypt`+`ws2_32` on Windows, and
+  skips `-Wall/-Wextra` on MSVC. The CLI (with linenoise) builds on all three.
 - **CI** (`.github/workflows/ci.yml`) runs ubuntu + macos + windows. Windows uses
   MSVC's multi-config generator, so build/test pass `--config`/`-C Release`.
-- **Local Windows check without a Windows box**: cross-compile with mingw-w64
-  (`x86_64-w64-mingw32-g++`) and run the test exes under `wine64`. This is how
-  the Win32 backend was first validated; CI's `windows-latest` is the real-MSVC
-  confirmation. Note mingw ≠ MSVC — CI catches MSVC-only issues.
+- **Local Windows check without a Windows box**: cross-compile with mingw-w64 and
+  run the exes under `wine64`. Use the **posix-thread** variant
+  (`x86_64-w64-mingw32-g++-posix`) — the default win32-thread one lacks
+  `std::thread`, which httplib needs. This is how the Win32 backend + CLI were
+  first validated; CI's `windows-latest` is the real-MSVC confirmation (mingw ≠
+  MSVC, so CI still catches MSVC-only issues).
+
+---
+
+## 15. Shell tab completion
+
+The interactive shell's line editing, history, and Tab completion come from
+vendored **linenoise-ng** (`third_party/linenoise`, BSD, cross-platform — the
+successor to antirez's linenoise with Windows + UTF-8 support). Linked into the
+CLI only; the core library and `web` don't touch it. History is **in-memory
+only** — never written to disk, since a pack's paths are sensitive.
+
+Completion (`completion_cb` in `cli/main.cpp`):
+- **first token** → the command list (`cat`, `get`, `ls`, …);
+- **a path argument** of a path-taking command (`cat/get/edit/rm/mv/cp/stat/ls`)
+  → in-pack paths from `Pack::list()`, **one folder level at a time** (typing
+  `cat mo`⇥ → `cat models/`, then `s`⇥ → `models/sub/`), just like a shell walks
+  a directory tree. `add`/`get`'s *local* file arg isn't completed.
+
+**The one local patch to the vendored lib.** linenoise-ng hands the completion
+callback only the *current word* (text after the last break char, and `/` is a
+break char) — too little to know the command or the parent folder. So a 6-line
+patch publishes the full line-before-cursor via `linenoiseCompletionContext()`
+(new function in `linenoise.h`, backed by a global set in `completeLine()` in
+`linenoise.cpp`). Both patch sites are tagged `[sealpack local patch]`. If you
+ever re-vendor a newer linenoise-ng, **re-apply those two hunks** or completion
+goes back to word-only (commands would leak into argument completion). The
+callback returns bare leaf segments; linenoise rebuilds `<prefix> + <candidate>`.

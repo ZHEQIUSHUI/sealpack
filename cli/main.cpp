@@ -23,10 +23,12 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
 
+#include "linenoise.h"    // vendored linenoise-ng: line editing + tab completion
 #include "platform.hpp"   // tty / no-echo password / editor — POSIX+Windows
 #include "preview.hpp"
 #include "sealpack.hpp"
@@ -189,21 +191,82 @@ static void shell_help() {
         "  compact               reclaim deleted space\n"
         "  rekey                 change the password (new password, twice)\n"
         "  help                  this list\n"
-        "  quit | exit           close and leave\n");
+        "  quit | exit           close and leave\n"
+        "(Tab completes commands and in-pack paths; ↑/↓ for history.)\n");
+}
+
+// ---- tab completion (commands + in-pack paths) ------------------------------
+
+// The open pack the completion callback reads paths from. Single-threaded shell,
+// one pack at a time, so a file-static pointer is enough (linenoise's callback
+// takes no user-data argument).
+static const Pack* g_completion_pack = nullptr;
+
+// Commands whose arguments are in-pack paths (so we complete them from list()).
+// `add`/`get` also take a *local* file arg, which we don't complete here.
+static bool cmd_completes_paths(const std::string& c) {
+    return c == "cat" || c == "get" || c == "edit" || c == "rm" ||
+           c == "mv"  || c == "cp"  || c == "stat" || c == "ls";
+}
+
+// Tab handler. linenoise-ng breaks the line on whitespace AND '/', so it hands
+// us only the current leaf word (e.g. "a" from "cat cfg/a") and rebuilds the
+// line as <everything-before-the-word> + <our candidate>. We therefore return
+// bare leaf segments. The command + parent folder we need for context come from
+// linenoiseCompletionContext() (the full line before the cursor).
+static void completion_cb(const char* word, linenoiseCompletions* lc) {
+    static const char* const kCmds[] = {
+        "ls", "get", "cat", "edit", "add", "rm", "mv", "cp", "stat",
+        "compact", "rekey", "help", "quit", "exit"};
+
+    const std::string leaf(word);                          // the segment being completed
+    const std::string line(linenoiseCompletionContext());  // full text before cursor
+
+    const size_t sp = line.find_last_of(" \t");
+    if (sp == std::string::npos) {                         // first token → complete a command
+        for (const char* c : kCmds)
+            if (std::strncmp(c, line.c_str(), line.size()) == 0)
+                linenoiseAddCompletion(lc, c);
+        return;
+    }
+    const std::string cmd = line.substr(0, line.find_first_of(" \t"));
+    if (!g_completion_pack || !cmd_completes_paths(cmd)) return;
+
+    // The whole path typed so far is the last space-delimited token; its parent
+    // folder is that token minus the leaf we're completing.
+    const std::string arg    = line.substr(sp + 1);            // e.g. "cfg/a"
+    const std::string parent = arg.substr(0, arg.size() - leaf.size());  // e.g. "cfg/"
+
+    std::set<std::string> cands;                           // sorted + de-duped leaf segments
+    for (const auto& e : g_completion_pack->list()) {
+        const std::string& p = e.path;
+        if (p.compare(0, parent.size(), parent) != 0) continue;   // must live under `parent`
+        const std::string rest = p.substr(parent.size());         // path below the parent
+        if (rest.compare(0, leaf.size(), leaf) != 0) continue;     // next segment matches the leaf
+        const size_t slash = rest.find('/');
+        cands.insert(slash == std::string::npos ? rest : rest.substr(0, slash + 1));  // file, or folder/
+    }
+    for (const auto& cand : cands) linenoiseAddCompletion(lc, cand.c_str());
 }
 
 static int shell(Pack* pk, const std::string& pack_path) {
     std::fprintf(stderr, "opened %s — 'help' for commands, 'quit' to exit.\n", pack_path.c_str());
-    std::string line;
+    g_completion_pack = pk;
+    linenoiseSetCompletionCallback(completion_cb);
+    linenoiseHistorySetMaxLen(200);   // in-memory only — never persisted (paths are sensitive)
     while (true) {
-        if (sealpack_cli::stdin_is_tty()) { std::fprintf(stderr, "sealpack> "); std::fflush(stderr); }
-        if (!std::getline(std::cin, line)) { std::fprintf(stderr, "\n"); break; }  // Ctrl-D
+        char* raw = linenoise("sealpack> ");   // handles editing + Tab; NULL on Ctrl-D/EOF
+        if (!raw) { std::fprintf(stderr, "\n"); break; }
+        const std::string line(raw);
+        std::free(raw);
         const auto a = tokenize(line);
         if (a.empty()) continue;
+        linenoiseHistoryAdd(line.c_str());
         if (a[0] == "quit" || a[0] == "exit") break;
         if (a[0] == "help" || a[0] == "?") { shell_help(); continue; }
         do_command(pk, a);  // errors are printed inside; the shell keeps going
     }
+    g_completion_pack = nullptr;
     return 0;
 }
 
