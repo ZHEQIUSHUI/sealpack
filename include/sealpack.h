@@ -44,6 +44,7 @@ typedef enum {
     SEALPACK_ERR_NOMEM = -5,
     SEALPACK_ERR_ARG   = -6,  // NULL / bad argument
     SEALPACK_ERR_EXISTS = -7,  // create() on an existing file
+    SEALPACK_ERR_PATCH = -8,  // patch does not apply to this pack (wrong base)
 } sealpack_status;
 
 // ---- open / create / close --------------------------------------------------
@@ -117,6 +118,21 @@ int sealpack_stat(sealpack_t* sp, const char* path, sealpack_entry* out);
 // Rewrite the file dropping blobs no live path references (space reclaim).
 // Atomic: writes a new file and swaps it in, so a crash keeps the old one.
 int sealpack_compact(sealpack_t* sp);
+
+// ---- incremental update (ship a delta, not the whole pack) ------------------
+
+// Apply a `.spkpatch` (produced by `sealpack diff` / sealpack_create_patch) to
+// this pack in place: only the changed files are added, removed ones deleted,
+// then committed atomically. The patch is encrypted under this pack's master key
+// — a patch for a different pack returns SEALPACK_ERR_AUTH — and it refuses with
+// SEALPACK_ERR_PATCH unless this pack matches the base the patch was built from.
+// This is the on-device path: download a small patch, apply it, no full re-push.
+int sealpack_apply_patch(sealpack_t* sp, const void* patch, size_t size);
+
+// Producer side: write a patch that turns `base` into `newer` into a freshly
+// malloc'd buffer (*out, *size); free with sealpack_free. Carries only the files
+// that differ, encrypted under `base`'s master key.
+int sealpack_create_patch(sealpack_t* base, sealpack_t* newer, void** out, size_t* size);
 
 // ---- password ---------------------------------------------------------------
 // Data is under a random master key; the password only wraps it into an 88-byte

@@ -28,6 +28,7 @@ one file, encrypted, deduplicated, and safe across power loss.
 | **Change password** | `rekey` re-wraps the master key under a new password — one 88B slot rewritten, the data blobs never move, so it's instant on a multi-GB pack |
 | **Deduplicated** | content-addressed (BLAKE2b): identical bytes stored once; `move`/`copy` are O(1) |
 | **Crash-safe** | append-only + atomic double-superblock commit — a power loss leaves the old state or the new one, never half-written |
+| **Incremental update** | `diff` builds a small `.spkpatch` of just the changed files; `patch` merges it into a deployed pack in place — ship a delta, not a multi-GB re-push. Encrypted under the pack's key and bound to its exact base version |
 | **Two APIs** | C++ `Pack` class (core) + C ABI (`sealpack.h`) wrapper for FFI |
 | **File-manager ready** | filesystem-style paths, `move`/`copy`/`list`(size+mtime)/`stat` — a UI splits paths on `/` into a folder tree |
 
@@ -75,6 +76,21 @@ sealpack ls     models.sealpack
 sealpack add    models.sealpack yolo/v2.axmodel model.bin
 sealpack web    models.sealpack                     # browser file-manager (+ change-password panel)
 ```
+
+## Incremental updates
+
+Updated one model in a shipped pack? Send a patch, not the whole pack. `diff`
+compares old→new and writes a `.spkpatch` with only the changed files; `patch`
+merges it into the deployed pack in place.
+```bash
+sealpack diff  v1.sealpack v2.sealpack update.spkpatch   # producer: build the delta
+sealpack patch deployed.sealpack update.spkpatch         # device: apply it (only the delta)
+```
+The patch is encrypted under the pack's own key (a patch for a different pack
+won't decrypt) and refuses to apply unless the target is the exact base it was
+built from — so you can't patch the wrong version. On device, the runtime calls
+`sealpack_apply_patch()`. It's **file-level** (whole changed files): the payload
+is binary models re-exported wholesale, so a byte-level diff would save nothing.
 
 ## On-disk format
 
@@ -126,7 +142,7 @@ junk tails to prove it.
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-ctest --test-dir build --output-on-failure   # crypto / index / store / pack / crash / capi
+ctest --test-dir build --output-on-failure   # crypto / index / store / pack / patch / crash / capi
 ```
 
 ## Platforms

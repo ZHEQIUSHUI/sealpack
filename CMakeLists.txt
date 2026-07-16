@@ -85,6 +85,7 @@ if(SEALPACK_BUILD_TESTS)
         index
         store
         pack
+        patch
         crash
     )
     foreach(t ${SEALPACK_TESTS})

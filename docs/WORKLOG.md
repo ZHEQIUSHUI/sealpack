@@ -6,6 +6,39 @@ reference). Commit hashes are on `ZHEQIUSHUI/sealpack`.
 
 ---
 
+## 2026-07-16 — incremental update: `diff` / `patch` (`.spkpatch`)
+
+So a shipped pack can be updated by sending only the changed files, not a whole
+re-push or loose sub-files. `diff old new out.spkpatch` builds the delta; `patch
+pack out.spkpatch` merges it in place. C ABI `sealpack_apply_patch` is the
+on-device path (the runtime downloads a patch and applies it).
+
+- **File-level, decided with the user.** Their model updates are whole re-exports
+  of binary `.axmodel`s (can't partial-update weights), so a new version is
+  ~entirely different bytes → a byte/char-level (git/bsdiff-style) delta would be
+  ≈ the full file and would break the content-addressed model. File granularity
+  captures the real win (ship 1 of N models). Noted CDC as the tool *if* updates
+  ever become fine-tunes. See DESIGN §16.
+- **Design.** Patch = changed paths (shipped once as plaintext, deduped by hash)
+  + deletions + a fingerprint of the base's logical state, all AEAD-sealed under
+  the **base pack's master key**. Two guards: wrong pack → won't decrypt
+  (`ERR_AUTH`, since every pack has a random master key); wrong base →
+  `logical_fingerprint` mismatch (`ERR_PATCH`, like `git apply`; also blocks
+  double-apply). Apply re-verifies each blob's content hash, then one `commit()`.
+- **Surfaced a real Windows/Linux difference.** The first test opened the *same*
+  pack file twice read-write; POSIX allows it (green on Linux) but `os_win32` uses
+  `FILE_SHARE_READ` only → second open fails → null deref → crash under wine.
+  Fixed the test (concurrent multi-writer is a non-goal); added the gotcha to
+  DESIGN §12.
+- **Validated.** New `test_patch` (38 checks: round-trip with change/add/delete/
+  dedup, deletion propagation, double-apply refusal, wrong-key refusal, empty
+  no-op) — green on Linux and under wine; a CLI `diff`→`patch` round-trip also
+  verified under wine (232 B patch vs the full pack). A real update ships only the
+  changed model: in a smoke test a 4-file change produced a 553 B patch against a
+  2.5 KB pack.
+
+---
+
 ## 2026-07-12 — shell tab completion (vendored linenoise-ng)
 
 The interactive shell was a dumb `std::getline` — no Tab, no history, no cursor

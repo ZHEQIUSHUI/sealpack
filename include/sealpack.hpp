@@ -60,6 +60,19 @@ public:
     bool commit();    // atomic double-superblock swap (the crash-safe point)
     bool compact();   // rewrite the file dropping unreferenced blobs
 
+    // ---- incremental update: ship a delta, not the whole pack ----
+    // create_patch: *this is the OLD/base state, `newer` the target. Writes an
+    // encrypted patch (into *out) that turns this pack's logical content into
+    // `newer`'s — it carries only the files that differ, plus the deletions. The
+    // patch is encrypted under THIS pack's master key, so it's confidential and
+    // binds to this base (a device with this pack's password can apply it, and a
+    // patch for a different pack simply won't decrypt).
+    // apply_patch: apply such a patch to *this in place (put/del + commit). It
+    // refuses unless this pack's logical state matches the base the patch was
+    // built from (like `git apply`), so you can't patch the wrong version.
+    bool create_patch(const Pack& newer, std::string* out) const;
+    bool apply_patch(const std::string& patch);
+
     // ---- password: change it without re-encrypting the data ----
     // Data is under a random master key; the password only wraps that key into
     // an 88-byte slot, so rekey rewrites that slot alone — the blobs never move,

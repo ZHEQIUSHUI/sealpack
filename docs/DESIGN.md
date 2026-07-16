@@ -251,7 +251,7 @@ live there, but the contract sealpack must not break:
 
 ```
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
-ctest --test-dir build          # crypto/index/store/pack/crash/capi
+ctest --test-dir build          # crypto/index/store/pack/patch/crash/capi
 ```
 
 The CLI binary is `build/sealpack` (target `sealpack-cli`,
@@ -272,7 +272,9 @@ The CLI binary is `build/sealpack` (target `sealpack-cli`,
 - **macOS durability** needs `F_FULLFSYNC`, not `fsync`.
 - **Adding a CLI command** = edit `do_command` + `is_command` + `shell_help` +
   `usage` + the `kCmds[]`/`cmd_completes_paths` list in `completion_cb` (so Tab
-  completes it too) — five places now.
+  completes it too) — five places. A command that opens two packs or none (like
+  `diff`, `create`, `web`) is instead a special case in `main()`, not a
+  `do_command` verb.
 - **`cat`/`edit`/web preview must refuse binary** via `looks_text` — dumping a
   model into a terminal or an editor is the failure mode we're guarding.
 - **Web is localhost + token only.** Don't add a bind-address option that
@@ -298,6 +300,11 @@ The CLI binary is `build/sealpack` (target `sealpack-cli`,
   `isatty` / `mkstemp` / `sys/wait` directly in `main.cpp`/`web.cpp` — route them
   through the shim so Windows keeps building. Same for tests: no `<unistd.h>`,
   `std::remove` over `::unlink`, CWD-relative pack paths (§14).
+- **Don't open the same pack file twice concurrently.** `os_win32` opens with
+  `FILE_SHARE_READ` only, so a second read-write open of a file already open R/W
+  fails on Windows (POSIX permissively allows it — a test that did this passed on
+  Linux and crashed under wine). Concurrent multi-writer is a non-goal anyway;
+  `diff` opens two *different* packs, which is fine.
 - **The 8 key slots are load-bearing format, not a feature.** Single-password is
   the product decision; keep the array on disk.
 
@@ -381,3 +388,51 @@ patch publishes the full line-before-cursor via `linenoiseCompletionContext()`
 ever re-vendor a newer linenoise-ng, **re-apply those two hunks** or completion
 goes back to word-only (commands would leak into argument completion). The
 callback returns bare leaf segments; linenoise rebuilds `<prefix> + <candidate>`.
+
+---
+
+## 16. Incremental update (`.spkpatch`)
+
+Ship a *delta*, not the whole pack. `diff old new` builds a small patch carrying
+only the files that changed; `patch pack file.spkpatch` merges it into a deployed
+pack in place. This is the on-device update path (the runtime downloads a patch
+and calls `sealpack_apply_patch`) — no re-pushing a multi-GB `.spk`.
+
+**File-level, deliberately — not byte/char-level.** The payload is opaque binary
+models (`.axmodel` etc.) that are re-exported wholesale on every update: a new
+version is ~entirely different bytes from the old, so a byte-level (bsdiff/git-
+style) delta would be ≈ the full file — no gain — while breaking the content-
+addressed model (blob = whole-content hash, stored once, random-access decrypt)
+and adding a heavy delta dependency. The real win is already at file granularity:
+update 1 of N models → ship 1, not N. (If updates ever became fine-tunes with
+mostly-identical bytes, *content-defined chunking* — not char-diff — would be the
+tool; layer it under the same command then.)
+
+**What the patch contains** (`create_patch`/`apply_patch` in `pack.cpp`): the
+paths whose content changed or is new (each shipped once as plaintext, deduped by
+hash), plus the list of removed paths, plus a fingerprint of the base's logical
+state. On-disk: `"SPKPATCH"` + version + a length-prefixed META record, then one
+record per shipped blob — every record AEAD-sealed under the **base pack's master
+key**.
+
+**Two independent safety guards:**
+- *Confidentiality + wrong-pack rejection* — the patch is encrypted under the
+  base's master key. A device decrypts it with its own pack's key (same key,
+  since the device pack IS a copy of the base). A patch for a different pack has a
+  different master key → it simply won't decrypt (`SEALPACK_ERR_AUTH`). Each
+  `create` mints a random master key, so this binds a patch to its exact pack
+  lineage, independent of the password.
+- *Wrong-base rejection* — the patch stores `logical_fingerprint(base)` (BLAKE2b
+  over the sorted path→content-hash map, ignoring physical layout so a compacted
+  copy still matches). `apply_patch` refuses unless the target's current
+  fingerprint equals it (`SEALPACK_ERR_PATCH`), like `git apply`. This also makes
+  double-apply and out-of-order patches fail safely.
+
+Apply verifies every shipped blob against its declared content hash (the CAS
+invariant) before writing, then does the puts/dels and **one** `commit()` (the
+usual crash-safe point — a power loss mid-apply leaves the pre-patch state).
+
+CLI: `diff` opens two packs so it's one-shot only (prompts for each password, or
+`$SEALPACK_PASSWORD` for both when non-TTY); `patch` is a normal `do_command`
+verb (works in the shell too). C ABI: `sealpack_apply_patch` (device side) +
+`sealpack_create_patch`.
