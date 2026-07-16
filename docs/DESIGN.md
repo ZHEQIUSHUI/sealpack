@@ -439,6 +439,8 @@ freely because merge is plaintext-level.
 
 CLI: `merge` is a normal `do_command` verb — `merge <update.spk> [-d <path>]…` in
 the shell (against the open pack), or `sealpack merge <target> <update.spk> [-d …]`
-one-shot. It opens the source pack, so it prompts for that pack's password (TTY) or
-uses `$SEALPACK_PASSWORD` (non-TTY, shared with the target). C ABI:
-`sealpack_merge(target, source)` (device side) — buffered, call `sealpack_commit`.
+one-shot. It opens the source pack, and **tries the target's password on it first**
+(a patch usually shares it) so the same-password case needs no extra prompt; only
+if that fails does it prompt for the source's password (TTY) — a different-password
+source therefore needs a terminal. C ABI: `sealpack_merge(target, source)` (device
+side) — buffered, call `sealpack_commit`.

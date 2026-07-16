@@ -38,6 +38,10 @@ using sealpack::Pack;
 using sealpack_cli::read_password;
 using sealpack_cli::edit_in_editor;
 
+// The open pack's password, remembered so `merge` can try it on the source pack
+// first (a patch usually shares the target's password) and skip a second prompt.
+static std::string g_session_password;
+
 // defined in cli/web.cpp
 int run_web(Pack* pack, const std::string& pack_path, const std::string& host, int port);
 
@@ -169,14 +173,18 @@ static int do_command(Pack* pk, const std::vector<std::string>& a) {
             if (a[i] == "-d" && i + 1 < a.size()) dels.push_back(a[++i]);
             else { std::fprintf(stderr, "usage: merge <source.spk> [-d <path>]...\n"); return 1; }
         }
-        std::string spw;   // the source pack's password (may equal this pack's)
-        if (sealpack_cli::stdin_is_tty()) spw = read_password("password for the source pack: ");
-        else {
-            const char* e = ::getenv("SEALPACK_PASSWORD");
-            if (!e) { std::fprintf(stderr, "merge: no terminal; set $SEALPACK_PASSWORD\n"); return 1; }
-            spw = e;
+        // Try this pack's password first — a patch usually shares it, so no
+        // second prompt. Only if that fails (different password) do we ask.
+        auto src = Pack::open(a[1], g_session_password);
+        if (!src) {
+            if (!sealpack_cli::stdin_is_tty()) {
+                std::fprintf(stderr, "merge: can't open %s with this pack's password "
+                                     "(different password needs a terminal)\n", a[1].c_str());
+                return 1;
+            }
+            const std::string spw = read_password("password for the source pack: ");
+            src = Pack::open(a[1], spw);
         }
-        auto src = Pack::open(a[1], spw);
         if (!src) { std::fprintf(stderr, "merge: open %s failed (wrong password or missing)\n", a[1].c_str()); return 1; }
         const size_t n = src->list().size();
         if (!pk->merge(*src)) { std::fprintf(stderr, "merge failed\n"); return 1; }
@@ -332,6 +340,7 @@ int main(int argc, char** argv) {
         const std::string pw = read_password("password: ");
         auto pk = Pack::open(argv[1], pw);
         if (!pk) { std::fprintf(stderr, "open failed (wrong password or missing file)\n"); return 1; }
+        g_session_password = pw;
         return shell(pk.get(), argv[1]);
     }
 
@@ -352,6 +361,7 @@ int main(int argc, char** argv) {
     if (!batch_password(&pw)) return 2;
     auto pk = Pack::open(pack, pw);
     if (!pk) { std::fprintf(stderr, "open failed (wrong password or missing file)\n"); return 1; }
+    g_session_password = pw;
 
     if (cmd == "web") {
         const int port = (argc >= 4) ? std::atoi(argv[3]) : 8777;
