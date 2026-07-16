@@ -1,0 +1,89 @@
+name: release
+
+# Rolling "latest" release: on every push to master, build the CLI + SDK for
+# Linux / macOS / Windows and attach them to a prerelease tagged `latest`.
+# Assets go straight to the Release (NOT workflow artifacts — those eat storage).
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write        # create/update the release + its tag
+
+concurrency:             # one rolling release at a time; newer push wins
+  group: release-latest
+  cancel-in-progress: true
+
+jobs:
+  # Recreate the `latest` release + tag ONCE, so the parallel build jobs below
+  # only have to upload their own asset (no cross-job artifact hand-off needed).
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: (re)create the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create latest \
+            --title "Latest (master)" \
+            --notes "Rolling multi-platform build of master (\`${GITHUB_SHA}\`). CLI \`sealpack\` + SDK (static lib + headers) per platform." \
+            --prerelease \
+            --target "${GITHUB_SHA}"
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  name: linux-x64 }
+          - { os: macos-latest,   name: macos-arm64 }
+          - { os: windows-latest, name: windows-x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: configure + build + test
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release -j
+          ctest --test-dir build --build-config Release --output-on-failure
+
+      # Package: bin/<cli>  lib/<libsealpack + libmonocypher>  include/<headers>.
+      # The SDK is the static lib; a consumer links BOTH libsealpack and monocypher.
+      - name: package (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          D="sealpack-${{ matrix.name }}"
+          mkdir -p "$D/bin" "$D/lib" "$D/include"
+          cp build/sealpack        "$D/bin/"
+          cp build/libsealpack.a   "$D/lib/"
+          cp build/libmonocypher.a "$D/lib/"
+          cp include/sealpack.h include/sealpack.hpp "$D/include/"
+          cp README.md "$D/" 2>/dev/null || true
+          printf 'sealpack SDK\n\nLink your program against BOTH static libs in lib/ and add include/ to\nyour header path:\n  cc app.c lib/libsealpack.a lib/libmonocypher.a -Iinclude\nSee include/sealpack.h (C ABI) / include/sealpack.hpp (C++). CLI is bin/sealpack.\n' > "$D/SDK.txt"
+          tar czf "$D.tar.gz" "$D"
+
+      - name: package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $D = "sealpack-${{ matrix.name }}"
+          New-Item -ItemType Directory -Force -Path "$D/bin","$D/lib","$D/include" | Out-Null
+          Copy-Item build/Release/sealpack.exe   "$D/bin/"
+          Copy-Item build/Release/sealpack.lib   "$D/lib/"
+          Copy-Item build/Release/monocypher.lib "$D/lib/"
+          Copy-Item include/sealpack.h,include/sealpack.hpp "$D/include/"
+          Copy-Item README.md "$D/" -ErrorAction SilentlyContinue
+          "sealpack SDK`r`n`r`nLink your program against BOTH static libs in lib\ (sealpack.lib +`r`nmonocypher.lib) and add include\ to your header path. CLI is bin\sealpack.exe." | Out-File -Encoding utf8 "$D/SDK.txt"
+          Compress-Archive -Path "$D" -DestinationPath "$D.zip"
+
+      - name: upload to the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release upload latest sealpack-${{ matrix.name }}.* --clobber
