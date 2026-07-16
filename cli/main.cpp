@@ -163,17 +163,27 @@ static int do_command(Pack* pk, const std::vector<std::string>& a) {
         std::fprintf(stderr, "compacted\n");
         return 0;
     }
-    if (c == "apply" && a.size() == 2) {   // apply a .spkpatch to the open pack
-        std::string blob;
-        if (!read_file(a[1].c_str(), &blob)) { std::fprintf(stderr, "read %s failed\n", a[1].c_str()); return 1; }
-        if (!pk->apply_patch(blob)) {
-            std::fprintf(stderr, "apply failed: %s\n",
-                         pk->last_error() == SEALPACK_ERR_AUTH
-                             ? "patch is for a different pack (won't decrypt)"
-                             : "corrupt or unreadable patch");
-            return 1;
+    if (c == "merge" && a.size() >= 2) {   // overlay a source pack's files onto the open pack
+        std::vector<std::string> dels;     // optional  -d <path>  removals
+        for (size_t i = 2; i < a.size(); ++i) {
+            if (a[i] == "-d" && i + 1 < a.size()) dels.push_back(a[++i]);
+            else { std::fprintf(stderr, "usage: merge <source.spk> [-d <path>]...\n"); return 1; }
         }
-        std::fprintf(stderr, "applied %s\n", a[1].c_str());
+        std::string spw;   // the source pack's password (may equal this pack's)
+        if (sealpack_cli::stdin_is_tty()) spw = read_password("password for the source pack: ");
+        else {
+            const char* e = ::getenv("SEALPACK_PASSWORD");
+            if (!e) { std::fprintf(stderr, "merge: no terminal; set $SEALPACK_PASSWORD\n"); return 1; }
+            spw = e;
+        }
+        auto src = Pack::open(a[1], spw);
+        if (!src) { std::fprintf(stderr, "merge: open %s failed (wrong password or missing)\n", a[1].c_str()); return 1; }
+        const size_t n = src->list().size();
+        if (!pk->merge(*src)) { std::fprintf(stderr, "merge failed\n"); return 1; }
+        for (const auto& d : dels) pk->del(d);   // also delete (ignore already-absent)
+        if (!pk->commit()) { std::fprintf(stderr, "merge: commit failed\n"); return 1; }
+        std::fprintf(stderr, "merged %s (%zu file%s)%s\n", a[1].c_str(), n, n == 1 ? "" : "s",
+                     dels.empty() ? "" : ", applied deletions");
         return 0;
     }
     if (c == "rekey" && a.size() == 1) {
@@ -203,7 +213,7 @@ static void shell_help() {
         "  cp <from> <to>        copy (dedup, 0 extra bytes)\n"
         "  stat <path>           size + mtime\n"
         "  compact               reclaim deleted space\n"
-        "  apply <file>          apply a .spkpatch (incremental update)\n"
+        "  merge <pack> [-d p]   overlay another pack's files (incremental update)\n"
         "  rekey                 change the password (new password, twice)\n"
         "  help                  this list\n"
         "  quit | exit           close and leave\n"
@@ -232,7 +242,7 @@ static bool cmd_completes_paths(const std::string& c) {
 static void completion_cb(const char* word, linenoiseCompletions* lc) {
     static const char* const kCmds[] = {
         "ls", "get", "cat", "edit", "add", "rm", "mv", "cp", "stat",
-        "compact", "apply", "rekey", "help", "quit", "exit"};
+        "compact", "merge", "rekey", "help", "quit", "exit"};
 
     const std::string leaf(word);                          // the segment being completed
     const std::string line(linenoiseCompletionContext());  // full text before cursor
@@ -289,7 +299,7 @@ static int shell(Pack* pk, const std::string& pack_path) {
 
 static bool is_command(const std::string& s) {
     static const char* k[] = {"create","add","get","cat","edit","ls","rm","mv","cp","stat",
-                              "compact","apply","diff","rekey","web"};
+                              "compact","merge","rekey","web"};
     for (auto c : k) if (s == c) return true;
     return false;
 }
@@ -300,9 +310,9 @@ static int usage() {
         "  sealpack <pack>               open + interactive shell (prompts for password)\n"
         "  sealpack create <pack>        create a new pack (prompts for password twice)\n"
         "  sealpack <cmd> <pack> [args]  one-shot: ls/add/get/cat/edit/rm/mv/cp/\n"
-        "                                stat/compact/apply; or  web <pack> [port]\n"
-        "  sealpack diff  <old> <new> <out.spkpatch>  build an incremental update\n"
-        "  sealpack apply <pack> <file.spkpatch>      apply one (only the delta)\n"
+        "                                stat/compact; or  web <pack> [port]\n"
+        "  sealpack merge <pack> <update.spk> [-d <path>]...   apply an incremental\n"
+        "                                update (overlay another pack's files)\n"
         "  one-shot prompts for the password on a terminal, else uses $SEALPACK_PASSWORD\n");
     return 2;
 }
@@ -335,31 +345,6 @@ int main(int argc, char** argv) {
         if (p1 != p2) { std::fprintf(stderr, "passwords don't match\n"); return 1; }
         auto pk = Pack::create(pack, p1);
         if (!pk || !pk->commit()) { std::fprintf(stderr, "create failed (already exists?)\n"); return 1; }
-        return 0;
-    }
-
-    // diff opens TWO packs, so it can't go through the single-pack path below.
-    if (cmd == "diff") {
-        if (argc < 5) { std::fprintf(stderr, "usage: sealpack diff <old.spk> <new.spk> <out.spkpatch>\n"); return 2; }
-        std::string pw_old, pw_new;
-        if (sealpack_cli::stdin_is_tty()) {
-            pw_old = read_password("password for old pack: ");
-            pw_new = read_password("password for new pack: ");
-        } else {
-            const char* e = ::getenv("SEALPACK_PASSWORD");
-            if (!e) { std::fprintf(stderr, "no terminal: set $SEALPACK_PASSWORD (and $SEALPACK_PASSWORD_NEW if the new pack differs)\n"); return 2; }
-            pw_old = e;
-            const char* e2 = ::getenv("SEALPACK_PASSWORD_NEW");   // else the new pack shares the old one's password
-            pw_new = (e2 && *e2) ? e2 : e;
-        }
-        auto oldpk = Pack::open(argv[2], pw_old);
-        if (!oldpk) { std::fprintf(stderr, "open %s failed (wrong password or missing)\n", argv[2]); return 1; }
-        auto newpk = Pack::open(argv[3], pw_new);
-        if (!newpk) { std::fprintf(stderr, "open %s failed (wrong password or missing)\n", argv[3]); return 1; }
-        std::string patch;
-        if (!oldpk->create_patch(*newpk, &patch)) { std::fprintf(stderr, "diff failed\n"); return 1; }
-        if (!write_file(argv[4], patch)) { std::fprintf(stderr, "write %s failed\n", argv[4]); return 1; }
-        std::fprintf(stderr, "wrote %s (%s)\n", argv[4], human_size(patch.size()).c_str());
         return 0;
     }
 

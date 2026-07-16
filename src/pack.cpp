@@ -16,55 +16,6 @@ uint64_t now_sec() { return os::now_seconds(); }
 // A stored record = nonce | mac | ciphertext. So enc_size = 40 + plain_size.
 constexpr size_t kRecOverhead = kNonceBytes + kMacBytes;
 
-// ---- patch (incremental update) format ----
-// A .spkpatch carries the files that differ between two packs, as ABSOLUTE
-// content (whole new files, not byte-deltas) — so it applies as a base-INDEPENDENT
-// overlay: set these paths, delete those, leave the rest. Idempotent, works on any
-// version of the pack. Layout: "SPKPATCH" + version + a length-prefixed META record
-// then one record per shipped blob, every record AEAD-sealed under the BASE pack's
-// master key (nonce|mac|cipher) — that seal is the confidentiality + pack-family
-// binding (a patch for a different pack won't decrypt). META plaintext:
-//   u32 nblobs; { hash(32); u64 plain_len }      shipped blobs, ordered by hash
-//   u32 nputs;  { u32 plen; path; hash(32) }     path -> content assignments
-//   u32 ndels;  { u32 plen; path }               removed paths
-constexpr char     kPatchMagic[8] = {'S','P','K','P','A','T','C','H'};
-constexpr uint32_t kPatchVersion  = 1;
-
-void put_u32(std::string& s, uint32_t v) { for (int i = 0; i < 4; ++i) s.push_back(char((v >> (8 * i)) & 0xff)); }
-void put_u64(std::string& s, uint64_t v) { for (int i = 0; i < 8; ++i) s.push_back(char((v >> (8 * i)) & 0xff)); }
-bool get_u32(const uint8_t* d, size_t n, size_t& p, uint32_t& v) {
-    if (p + 4 > n) return false;
-    v = uint32_t(d[p]) | uint32_t(d[p+1]) << 8 | uint32_t(d[p+2]) << 16 | uint32_t(d[p+3]) << 24;
-    p += 4; return true;
-}
-bool get_u64(const uint8_t* d, size_t n, size_t& p, uint64_t& v) {
-    if (p + 8 > n) return false;
-    v = 0; for (int i = 0; i < 8; ++i) v |= uint64_t(d[p+i]) << (8 * i);
-    p += 8; return true;
-}
-bool get_bytes(const uint8_t* d, size_t n, size_t& p, size_t len, std::string& out) {
-    if (p + len > n) return false;
-    out.assign(reinterpret_cast<const char*>(d) + p, len); p += len; return true;
-}
-
-// One AEAD record (nonce|mac|cipher) under `key`, into a fresh string. Empty on
-// RNG failure.
-std::string seal_record(const uint8_t key[kKeyBytes], const void* data, size_t n) {
-    std::string rec(kRecOverhead + n, '\0');
-    uint8_t* p = reinterpret_cast<uint8_t*>(&rec[0]);
-    if (random_bytes(p, kNonceBytes) != 0) return std::string();
-    aead_encrypt(p + kRecOverhead, p + kNonceBytes, key, p, nullptr, 0,
-                 static_cast<const uint8_t*>(data), n);
-    return rec;
-}
-bool open_record(const uint8_t key[kKeyBytes], const uint8_t* rec, size_t enc_len, std::string* out) {
-    if (enc_len < kRecOverhead) return false;
-    const size_t plain = enc_len - kRecOverhead;
-    out->assign(plain, '\0');
-    return aead_decrypt(reinterpret_cast<uint8_t*>(&(*out)[0]), rec + kNonceBytes, key, rec,
-                        nullptr, 0, rec + kRecOverhead, plain) == 0;
-}
-
 // Encrypt `data` and append it as one record; fill *out (refcount left 0).
 bool encrypt_append(Store& st, const uint8_t key[kKeyBytes],
                     const void* data, size_t n, BlobRef* out) {
@@ -403,132 +354,40 @@ bool Pack::rekey(const std::string& new_password) {
     return true;
 }
 
-bool Pack::create_patch(const Pack& newer, std::string* out) const {
-    Impl& base = *impl_;            // *this = old/base state
-    Impl& tgt  = *newer.impl_;      // newer = target state
+// Reserved control file: a merge source may carry one, listing paths to delete
+// (one per line; blank lines and '#' comments ignored). It's consumed as
+// deletions, never merged as content — so an update pack can express removals
+// even though a pack itself has no "delete" record. See sealpack.hpp / DESIGN §16.
+static const char* const kMergeDelList = ".spkdel";
 
-    // Logical delta: paths in `newer` that are new or point at different content
-    // are "puts" (ship the blob once, deduped by hash); paths gone from `newer`
-    // are "dels".
-    std::vector<std::pair<std::string, std::string>> puts;   // (path, content hash)
-    std::vector<std::string>                         dels;
-    std::map<std::string, std::string>               blobs;  // hash -> plaintext (deduped)
-    for (const auto& kv : tgt.index.paths) {
-        const std::string& path = kv.first;
-        const std::string& hash = kv.second.hash;
-        auto bit = base.index.paths.find(path);
-        if (bit != base.index.paths.end() && bit->second.hash == hash) continue;  // unchanged
-        puts.emplace_back(path, hash);
-        if (blobs.find(hash) == blobs.end()) {
-            std::string plain;
-            if (!newer.get(path, &plain)) { base.last_err = SEALPACK_ERR_IO; return false; }
-            blobs.emplace(hash, std::move(plain));
+bool Pack::merge(const Pack& other) {
+    Impl& im = *impl_;
+    // Overlay every file from `other` onto this pack: same path overwrites, new
+    // path is added, everything else is left alone (base-independent, idempotent).
+    // Buffered like put()/del(); the caller commits.
+    for (const auto& kv : other.impl_->index.paths) {
+        if (kv.first == kMergeDelList) continue;   // control file, handled below
+        std::string data;
+        if (!other.get(kv.first, &data)) { im.last_err = SEALPACK_ERR_IO; return false; }
+        if (!put(kv.first, data)) return false;    // put sets last_err on failure
+    }
+
+    if (other.has(kMergeDelList)) {                // process carried deletions
+        std::string list;
+        if (!other.get(kMergeDelList, &list)) { im.last_err = SEALPACK_ERR_IO; return false; }
+        size_t start = 0;
+        while (start <= list.size()) {
+            size_t nl = list.find('\n', start);
+            std::string line = list.substr(start, (nl == std::string::npos ? list.size() : nl) - start);
+            start = (nl == std::string::npos) ? list.size() + 1 : nl + 1;
+            const size_t b = line.find_first_not_of(" \t\r");
+            const size_t e = line.find_last_not_of(" \t\r");
+            if (b == std::string::npos) continue;           // blank
+            std::string path = line.substr(b, e - b + 1);
+            if (path[0] == '#') continue;                   // comment
+            del(path);                                      // ignore not-found
         }
     }
-    for (const auto& kv : base.index.paths)
-        if (tgt.index.paths.find(kv.first) == tgt.index.paths.end())
-            dels.push_back(kv.first);
-
-    // META plaintext.
-    std::string meta;
-    put_u32(meta, static_cast<uint32_t>(blobs.size()));
-    for (const auto& kv : blobs) { meta += kv.first; put_u64(meta, kv.second.size()); }
-    put_u32(meta, static_cast<uint32_t>(puts.size()));
-    for (const auto& pr : puts) { put_u32(meta, static_cast<uint32_t>(pr.first.size())); meta += pr.first; meta += pr.second; }
-    put_u32(meta, static_cast<uint32_t>(dels.size()));
-    for (const auto& d : dels) { put_u32(meta, static_cast<uint32_t>(d.size())); meta += d; }
-
-    // Seal META + each blob under the BASE master key, in the same hash order.
-    std::string meta_rec = seal_record(base.key, meta.data(), meta.size());
-    if (meta_rec.empty()) { base.last_err = SEALPACK_ERR_IO; return false; }
-    std::string body;
-    body.append(kPatchMagic, 8);
-    put_u32(body, kPatchVersion);
-    put_u64(body, meta_rec.size());
-    body += meta_rec;
-    for (const auto& kv : blobs) {
-        std::string rec = seal_record(base.key, kv.second.data(), kv.second.size());
-        if (rec.empty()) { base.last_err = SEALPACK_ERR_IO; return false; }
-        body += rec;
-    }
-    *out = std::move(body);
-    base.last_err = SEALPACK_OK;
-    return true;
-}
-
-bool Pack::apply_patch(const std::string& patch) {
-    Impl& im = *impl_;
-    const uint8_t* d = reinterpret_cast<const uint8_t*>(patch.data());
-    const size_t   n = patch.size();
-
-    size_t p = 0;
-    uint32_t ver; uint64_t meta_len;
-    if (n < 8 || std::memcmp(d, kPatchMagic, 8) != 0) { im.last_err = SEALPACK_ERR_CORRUPT; return false; }
-    p = 8;
-    if (!get_u32(d, n, p, ver) || ver != kPatchVersion ||
-        !get_u64(d, n, p, meta_len) || p + meta_len > n) { im.last_err = SEALPACK_ERR_CORRUPT; return false; }
-
-    std::string meta;   // wrong pack (master key mismatch) or tampering → AEAD fails
-    if (!open_record(im.key, d + p, meta_len, &meta)) { im.last_err = SEALPACK_ERR_AUTH; return false; }
-    p += meta_len;
-
-    const uint8_t* m = reinterpret_cast<const uint8_t*>(meta.data());
-    const size_t   mn = meta.size();
-    size_t mp = 0;
-
-    uint32_t nblobs;
-    if (!get_u32(m, mn, mp, nblobs)) { im.last_err = SEALPACK_ERR_CORRUPT; return false; }
-    std::vector<std::pair<std::string, uint64_t>> bloblist;
-    for (uint32_t i = 0; i < nblobs; ++i) {
-        std::string h; uint64_t len;
-        if (!get_bytes(m, mn, mp, kHashBytes, h) || !get_u64(m, mn, mp, len)) { im.last_err = SEALPACK_ERR_CORRUPT; return false; }
-        bloblist.emplace_back(std::move(h), len);
-    }
-    uint32_t nputs;
-    if (!get_u32(m, mn, mp, nputs)) { im.last_err = SEALPACK_ERR_CORRUPT; return false; }
-    std::vector<std::pair<std::string, std::string>> puts;
-    for (uint32_t i = 0; i < nputs; ++i) {
-        uint32_t plen; std::string path, h;
-        if (!get_u32(m, mn, mp, plen) || !get_bytes(m, mn, mp, plen, path) ||
-            !get_bytes(m, mn, mp, kHashBytes, h)) { im.last_err = SEALPACK_ERR_CORRUPT; return false; }
-        puts.emplace_back(std::move(path), std::move(h));
-    }
-    uint32_t ndels;
-    if (!get_u32(m, mn, mp, ndels)) { im.last_err = SEALPACK_ERR_CORRUPT; return false; }
-    std::vector<std::string> dels;
-    for (uint32_t i = 0; i < ndels; ++i) {
-        uint32_t plen; std::string path;
-        if (!get_u32(m, mn, mp, plen) || !get_bytes(m, mn, mp, plen, path)) { im.last_err = SEALPACK_ERR_CORRUPT; return false; }
-        dels.push_back(std::move(path));
-    }
-
-    // Decrypt the blob records (in `bloblist` order) and verify each matches its
-    // declared content hash (the CAS invariant), so a corrupt patch can't slip in.
-    std::map<std::string, std::string> blobs;
-    for (const auto& b : bloblist) {
-        const uint64_t enc_len = kRecOverhead + b.second;
-        if (p + enc_len > n) { im.last_err = SEALPACK_ERR_CORRUPT; return false; }
-        std::string plain;
-        if (!open_record(im.key, d + p, static_cast<size_t>(enc_len), &plain)) { im.last_err = SEALPACK_ERR_AUTH; return false; }
-        p += enc_len;
-        uint8_t hh[kHashBytes];
-        content_hash(hh, reinterpret_cast<const uint8_t*>(plain.data()), plain.size());
-        if (std::memcmp(hh, b.first.data(), kHashBytes) != 0) { im.last_err = SEALPACK_ERR_CORRUPT; return false; }
-        blobs.emplace(b.first, std::move(plain));
-    }
-
-    // Overlay onto whatever this pack currently is: set the shipped files, delete
-    // the listed ones, leave everything else. Base-independent and idempotent (a
-    // re-apply just re-sets identical content and deletes already-gone paths).
-    // One atomic commit at the end (put/del buffer; commit is the crash-safe point).
-    for (const auto& pr : puts) {
-        auto it = blobs.find(pr.second);
-        if (it == blobs.end()) { im.last_err = SEALPACK_ERR_CORRUPT; return false; }  // put references an unshipped blob
-        if (!put(pr.first, it->second)) return false;
-    }
-    for (const auto& path : dels)
-        if (!del(path) && im.last_err != SEALPACK_ERR_NOTFOUND) return false;   // already-absent is fine
-    if (!commit()) return false;
     im.last_err = SEALPACK_OK;
     return true;
 }

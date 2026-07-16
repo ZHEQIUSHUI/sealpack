@@ -60,18 +60,17 @@ public:
     bool commit();    // atomic double-superblock swap (the crash-safe point)
     bool compact();   // rewrite the file dropping unreferenced blobs
 
-    // ---- incremental update: ship a delta, not the whole pack ----
-    // create_patch: *this is the OLD/base state, `newer` the target. Writes an
-    // encrypted patch (into *out) carrying only the files that differ (as whole
-    // new contents) plus the deletions. Encrypted under THIS pack's master key, so
-    // it's confidential and bound to this pack family (a patch for a different pack
-    // won't decrypt).
-    // apply_patch: overlay the patch onto *this in place (set the changed files,
-    // delete the removed ones, leave the rest; then commit). Base-independent —
-    // it applies to any version of the pack and is idempotent — because a
-    // file-level patch carries absolute content, not byte-deltas.
-    bool create_patch(const Pack& newer, std::string* out) const;
-    bool apply_patch(const std::string& patch);
+    // ---- incremental update: ship a small pack, not the whole thing ----
+    // A "patch" is just another sealpack containing the files you want to update.
+    // merge() overlays every file from `other` onto this pack: same path
+    // overwrites, new path is added, everything else is left untouched. So to
+    // update a file, build a tiny pack with just that file (create + put) and
+    // merge it into the deployed one. Base-independent and idempotent. Buffered
+    // like put()/del() — call commit() after.
+    // Deletions travel in the patch too: if `other` contains a file named
+    // ".spkdel" its lines are treated as paths to delete (that control file is
+    // consumed, not merged). So an update pack fully describes its update.
+    bool merge(const Pack& other);
 
     // ---- password: change it without re-encrypting the data ----
     // Data is under a random master key; the password only wraps that key into

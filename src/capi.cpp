@@ -95,22 +95,9 @@ int sealpack_compact(sealpack_t* sp) {
     return sp->pack->compact() ? SEALPACK_OK : sp->pack->last_error();
 }
 
-int sealpack_apply_patch(sealpack_t* sp, const void* patch, size_t size) {
-    if (!sp || (!patch && size)) return SEALPACK_ERR_ARG;
-    std::string p(static_cast<const char*>(patch), size);
-    return sp->pack->apply_patch(p) ? SEALPACK_OK : sp->pack->last_error();
-}
-
-int sealpack_create_patch(sealpack_t* base, sealpack_t* newer, void** out, size_t* size) {
-    if (!base || !newer || !out || !size) return SEALPACK_ERR_ARG;
-    std::string buf;
-    if (!base->pack->create_patch(*newer->pack, &buf)) return base->pack->last_error();
-    void* m = std::malloc(buf.empty() ? 1 : buf.size());
-    if (!m) return SEALPACK_ERR_NOMEM;
-    std::memcpy(m, buf.data(), buf.size());
-    *out = m;
-    *size = buf.size();
-    return SEALPACK_OK;
+int sealpack_merge(sealpack_t* target, sealpack_t* source) {
+    if (!target || !source) return SEALPACK_ERR_ARG;
+    return target->pack->merge(*source->pack) ? SEALPACK_OK : target->pack->last_error();
 }
 
 int sealpack_rekey(sealpack_t* sp, const char* new_password) {

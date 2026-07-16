@@ -272,9 +272,10 @@ The CLI binary is `build/sealpack` (target `sealpack-cli`,
 - **macOS durability** needs `F_FULLFSYNC`, not `fsync`.
 - **Adding a CLI command** = edit `do_command` + `is_command` + `shell_help` +
   `usage` + the `kCmds[]`/`cmd_completes_paths` list in `completion_cb` (so Tab
-  completes it too) — five places. A command that opens two packs or none (like
-  `diff`, `create`, `web`) is instead a special case in `main()`, not a
-  `do_command` verb.
+  completes it too) — five places. A command that opens no pack or is otherwise
+  special (like `create`, `web`) is instead a special case in `main()`, not a
+  `do_command` verb. (`merge` opens a *second* pack but is still a normal verb —
+  the target is the already-open pack, the source is just an argument it opens.)
 - **`cat`/`edit`/web preview must refuse binary** via `looks_text` — dumping a
   model into a terminal or an editor is the failure mode we're guarding.
 - **Web is localhost + token only.** Don't add a bind-address option that
@@ -391,58 +392,53 @@ callback returns bare leaf segments; linenoise rebuilds `<prefix> + <candidate>`
 
 ---
 
-## 16. Incremental update (`.spkpatch`)
+## 16. Incremental update — a patch is just a pack you `merge`
 
-Ship a *delta*, not the whole pack. `diff old new` builds a small patch of the
-files that changed; `apply pack file.spkpatch` overlays it onto a deployed pack in
-place. This is the on-device update path (the runtime downloads a patch and calls
-`sealpack_apply_patch`) — no re-pushing a multi-GB `.spk`.
+Ship a small pack of the changed files, not the whole thing. **A "patch" is not a
+special format — it's an ordinary `.spk`** containing the files you want to update.
+`merge target update.spk` overlays it: same path overwrites, new path is added,
+everything else is untouched. This is the on-device path (the runtime downloads a
+small pack and calls `sealpack_merge`) — no re-pushing a multi-GB `.spk`.
+
+Why an ordinary pack rather than a bespoke `.spkpatch` format (which an earlier
+cut had): building a patch is then just `create` + `add` (no new tooling), the
+patch is inspectable with every existing command (`ls`/`cat`/`web` it), and the
+core shrinks to one small `merge`. (History: it went `.spkpatch` + `diff`/`apply`
+→ this, on the maintainer's call that "the patch should just be an spk.")
 
 **File-level, deliberately — not byte/char-level.** The payload is opaque binary
 models (`.axmodel` etc.) re-exported wholesale on every update: a new version is
-~entirely different bytes from the old, so a byte-level (bsdiff/git-style) delta
-would be ≈ the full file — no gain — while breaking the content-addressed model
-(blob = whole-content hash, stored once, random-access decrypt) and adding a heavy
-delta dependency. The win is already at file granularity: update 1 of N models →
-ship 1, not N. (If updates ever became fine-tunes with mostly-identical bytes,
-*content-defined chunking* — not char-diff — would be the tool; layer it under the
-same command then.)
+~entirely different bytes, so a byte-level (bsdiff/git-style) delta would be ≈ the
+full file — no gain — while breaking the content-addressed model and adding a
+heavy dependency. The win is at file granularity: update 1 of N models → ship a
+pack with 1. (Fine-tunes with mostly-identical bytes would call for *content-
+defined chunking*, not char-diff; not the workload here.)
 
-**Base-independent overlay.** Because a file-level patch carries *absolute*
-content (whole new files), not byte-deltas, applying it doesn't depend on the
-target being any specific version. `apply_patch` just sets the changed files,
-deletes the removed ones, and leaves everything else — so one patch applies to any
-version of the pack, is **idempotent** (re-applying is a no-op), and never
-half-transforms. (An earlier cut hard-refused unless the target matched the exact
-base the diff was built from, like `git apply`; that version-lock was dropped as
-over-restrictive for absolute-content patches — a byte-delta would need it, this
-doesn't.) Trade-off: applying patches *out of order* silently merges instead of
-refusing — fine for forward updates to read-only devices.
+**Overlay semantics** (`Pack::merge` in `pack.cpp`): for each path in the source,
+`put` it into the target (reusing all the normal dedup/commit machinery); the
+source is read as plaintext and re-encrypted under the target's key, so the two
+packs need not share a key or password. It's base-independent (applies to any
+version of the target) and **idempotent**. Buffered like `put`/`del`; the caller
+commits once (the crash-safe point).
 
-**What binds a patch to a pack** is confidentiality, not version: every record is
-AEAD-sealed under the **base pack's master key**, so a patch for a different pack
-simply won't decrypt (`SEALPACK_ERR_AUTH`). Each `create` mints a random master
-key, so this ties a patch to its pack *lineage* independent of the password.
+**Deletions ride in the patch** via a reserved control file: if the source pack
+contains **`.spkdel`**, each of its lines is a path to delete from the target
+(blank lines and `#` comments ignored). That file is *consumed* — deleted paths
+removed — not merged as content, so an update pack fully self-describes its update
+(the runtime gets deletions for free). Build it with `add …/.spkdel <listfile>` or
+`edit …/.spkdel`. The CLI `merge` also takes ad-hoc `-d <path>` flags on top.
 
-**Format** (`create_patch`/`apply_patch` in `pack.cpp`): `"SPKPATCH"` + version +
-a length-prefixed META record, then one record per shipped blob, all sealed under
-the master key. META = `{nblobs: hash+len}` + `{nputs: path+hash}` +
-`{ndels: path}`. Changed/new blobs are shipped once, deduped by hash. Apply
-verifies every blob against its content hash (the CAS invariant) before writing,
-then does the puts/dels and **one** `commit()` (the crash-safe point — a power
-loss mid-apply leaves the pre-patch state).
+**Confidentiality**: the update pack is itself an encrypted `.spk`, so it's
+confidential in transit like any pack. (Unlike the old `.spkpatch`, it is *not*
+sealed to the target's master key — merge works cross-key — so there's no
+automatic "wrong pack" rejection; merging an unrelated pack would just overlay its
+files. The producer controls what they ship.) Give the update pack the **same
+password** as the target and the operator types one password; different passwords
+work too (two prompts). No baseline/master-key lineage to preserve — updates chain
+freely because merge is plaintext-level.
 
-**Chaining across releases — evolve one baseline, don't re-`create`.** A patch is
-sealed under, and applies under, one master key; the device's master key never
-changes across updates. So the producer must keep a **single baseline pack**
-(stable master key) and evolve it per release — snapshot it, mutate the working
-copy, `diff snapshot working`. If instead each version is a fresh `create` (new
-random key), a patch built from one won't decrypt on a device carrying another's
-key. In the evolve workflow there is one key and one password throughout, so the
-two packs a `diff` opens never mismatch.
-
-CLI: `diff` opens two packs so it's **one-shot only** (a producer op; direction is
-explicit `old new`) — prompts for each password on a TTY, else `$SEALPACK_PASSWORD`
-for old and `$SEALPACK_PASSWORD_NEW` for new (falls back to the former). `apply` is
-a normal `do_command` verb (works in the shell too). C ABI: `sealpack_apply_patch`
-(device side) + `sealpack_create_patch`.
+CLI: `merge` is a normal `do_command` verb — `merge <update.spk> [-d <path>]…` in
+the shell (against the open pack), or `sealpack merge <target> <update.spk> [-d …]`
+one-shot. It opens the source pack, so it prompts for that pack's password (TTY) or
+uses `$SEALPACK_PASSWORD` (non-TTY, shared with the target). C ABI:
+`sealpack_merge(target, source)` (device side) — buffered, call `sealpack_commit`.

@@ -6,50 +6,51 @@ reference). Commit hashes are on `ZHEQIUSHUI/sealpack`.
 
 ---
 
-## 2026-07-16 — incremental update: `diff` / `apply` (`.spkpatch`)
+## 2026-07-16 — incremental update: a patch is just a pack you `merge`
 
-So a shipped pack can be updated by sending only the changed files, not a whole
-re-push or loose sub-files. `diff old new out.spkpatch` builds the delta; `apply
-pack out.spkpatch` overlays it in place. C ABI `sealpack_apply_patch` is the
-on-device path (the runtime downloads a patch and applies it).
+Update a shipped pack by sending only the changed files. The design went through
+three shapes in one session, converging (on the maintainer's steering) to the
+simplest: **a "patch" is an ordinary `.spk`; `merge target update.spk` overlays
+it** (same path overwrites, new path adds, rest untouched). C ABI `sealpack_merge`
+is the on-device path.
 
-- **File-level, decided with the user.** Their model updates are whole re-exports
-  of binary `.axmodel`s (can't partial-update weights), so a new version is
-  ~entirely different bytes → a byte/char-level (git/bsdiff-style) delta would be
-  ≈ the full file and would break the content-addressed model. File granularity
-  captures the real win (ship 1 of N models). Noted CDC as the tool *if* updates
-  ever become fine-tunes. See DESIGN §16.
-- **Base-independent overlay (a mid-build correction).** First cut stored a
-  `logical_fingerprint(base)` and hard-refused unless the target matched it
-  exactly, like `git apply`. The user pushed back: a *file-level* patch carries
-  absolute content, so it shouldn't be version-locked. Right — dropped the
-  fingerprint. `apply` now just sets the changed files / deletes the removed ones
-  / leaves the rest: applies to **any** version of the pack, **idempotent**, and
-  one patch can update devices at different states. Kept the master-key seal
-  (confidentiality + pack-lineage binding — wrong pack won't decrypt, `ERR_AUTH`);
-  removed the now-unused `ERR_PATCH`. Trade-off noted: out-of-order application
-  silently merges instead of refusing (fine for forward-only, read-only devices).
-- **Naming.** `patch` → `apply` (user's call): clearer for non-VCS folks, matches
-  the C API `sealpack_apply_patch`, and avoids `merge`'s false implication of
-  conflict resolution (there is none — it's a straight overlay).
-- **Chaining needs a stable master key.** Surfaced while working through the
-  password questions: a patch is sealed under one master key and the device's key
-  never changes, so the producer must **evolve one baseline pack**, not re-`create`
-  each release (a fresh key breaks the chain). In that workflow there's one key +
-  one password throughout, so `diff`'s two packs never mismatch. Documented the
-  workflow (DESIGN §16, README). Non-TTY `diff` now takes `$SEALPACK_PASSWORD` +
-  optional `$SEALPACK_PASSWORD_NEW`.
-- **Surfaced a real Windows/Linux difference.** The first test opened the *same*
-  pack file twice read-write; POSIX allows it (green on Linux) but `os_win32` uses
-  `FILE_SHARE_READ` only → second open fails → null deref → crash under wine.
-  Fixed the test (concurrent multi-writer is a non-goal); added the gotcha to
-  DESIGN §12.
-- **Validated.** `test_patch` (round-trip with change/add/delete/dedup, deletion
-  propagation, idempotent re-apply, wrong-key refusal, empty no-op) — green on
-  Linux and under wine. CLI checks: a patch built v1→v2 (only file `a` changed)
-  applied cleanly onto a same-family pack whose `b` had been changed independently
-  — `a` overlaid, `b` preserved — proving base-independence; wrong-pack still
-  refused. A 4-file change produced a 553 B patch against a 2.5 KB pack.
+- **File-level, decided with the user.** Model updates are whole re-exports of
+  binary `.axmodel`s (can't partial-update weights) → a byte/char-level delta
+  would be ≈ the full file and break the content-addressed model. Ship a pack with
+  the changed files. (CDC noted as the tool *if* updates ever become fine-tunes.)
+- **Design converged over three cuts** (all same day, driven by the user's
+  questions):
+  1. `.spkpatch` bespoke format + `diff`/`apply`, base-fingerprint hard-refuse
+     (git-apply style).
+  2. User: a file-level patch is absolute content, shouldn't be version-locked →
+     dropped the fingerprint; base-independent, idempotent overlay. Renamed
+     `patch`→`apply`.
+  3. User: "the patch should just be an spk — I create one and merge it in." Right,
+     and simpler: **dropped the whole `.spkpatch` format**, `create_patch`/
+     `apply_patch`, and `diff`. Now it's `Pack::merge(other)` = overlay every path
+     from `other` via the existing `put`. Building a patch is `create`+`add`; the
+     patch is inspectable with `ls`/`cat`/`web` because it *is* a pack. Net: less
+     code, no new format.
+- **Deletions** (the one thing a pack can't express): a reserved **`.spkdel`** file
+  in the update pack lists paths to delete (one per line, `#` comments ok); `merge`
+  applies them and consumes the file (doesn't merge it). So an update pack fully
+  self-describes — the runtime gets deletions for free. CLI `merge` also takes
+  ad-hoc `-d <path>` flags.
+- **No key/lineage coupling anymore.** merge reads the source as plaintext and
+  re-encrypts under the target's key, so the update pack can have its own
+  password/key. Give it the target's password → the operator types one; different
+  passwords work too. Updates chain freely (no "evolve one baseline" constraint the
+  `.spkpatch` version needed). Trade-off vs the old sealed format: no automatic
+  wrong-pack rejection — merging an unrelated pack just overlays its files (the
+  producer controls what they ship). The update pack is still encrypted in transit.
+- **Windows/Linux gotcha (found via wine).** An early test opened the *same* pack
+  twice read-write; POSIX allows it, `os_win32`'s `FILE_SHARE_READ` doesn't →
+  crash under wine. Fixed the test; gotcha in DESIGN §12.
+- **Validated.** `test_merge` (overwrite + add + preserve untouched + `.spkdel`
+  delete + control-file-not-merged + idempotent re-merge + source under a different
+  password) — green on Linux and under wine. CLI end-to-end: build an `update.spk`
+  (`create`+`add`+`.spkdel`), `merge` it → target updated, old file deleted,
+  untouched file preserved, `.spkdel` not landed; `-d` ad-hoc delete verified too.
 
 ---
 

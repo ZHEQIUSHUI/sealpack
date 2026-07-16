@@ -28,7 +28,7 @@ one file, encrypted, deduplicated, and safe across power loss.
 | **Change password** | `rekey` re-wraps the master key under a new password — one 88B slot rewritten, the data blobs never move, so it's instant on a multi-GB pack |
 | **Deduplicated** | content-addressed (BLAKE2b): identical bytes stored once; `move`/`copy` are O(1) |
 | **Crash-safe** | append-only + atomic double-superblock commit — a power loss leaves the old state or the new one, never half-written |
-| **Incremental update** | `diff` builds a small `.spkpatch` of just the changed files; `apply` overlays it onto a deployed pack in place — ship a delta, not a multi-GB re-push. Encrypted under the pack's key; base-independent and idempotent |
+| **Incremental update** | a "patch" is just a small pack of the changed files; `merge` overlays it onto a deployed pack in place — ship a delta, not a multi-GB re-push. Base-independent and idempotent; deletions ride along in a `.spkdel` list |
 | **Two APIs** | C++ `Pack` class (core) + C ABI (`sealpack.h`) wrapper for FFI |
 | **File-manager ready** | filesystem-style paths, `move`/`copy`/`list`(size+mtime)/`stat` — a UI splits paths on `/` into a folder tree |
 
@@ -79,28 +79,32 @@ sealpack web    models.sealpack                     # browser file-manager (+ ch
 
 ## Incremental updates
 
-Updated one model in a shipped pack? Send a patch, not the whole pack. `diff`
-compares old→new and writes a `.spkpatch` with only the changed files; `apply`
-overlays it onto the deployed pack in place.
+Updated one model in a shipped pack? Send a small pack, not the whole thing. **A
+"patch" is just an ordinary `.spk`** with the files you want to update — build it
+with the commands you already know, then `merge` it into the deployed pack:
 ```bash
-sealpack diff  v1.sealpack v2.sealpack update.spkpatch   # producer: build the delta
-sealpack apply deployed.sealpack update.spkpatch         # device: overlay it (only the delta)
-```
-It's **file-level** (whole changed files: the payload is binary models re-exported
-wholesale, so a byte-level diff would save nothing) and therefore a **base-
-independent overlay** — it sets the changed files and leaves the rest, so one
-patch applies to any version of the pack and re-applying is a harmless no-op. The
-patch is encrypted under the pack's own key, so a patch for a different pack won't
-decrypt. On device, the runtime calls `sealpack_apply_patch()`.
+# producer: a tiny pack with just the changed files (same password as the target)
+sealpack create update.spk
+sealpack add    update.spk models/yolo.axmodel ./yolo-v2.axmodel
+sealpack add    update.spk cfg/app.yaml        ./app.yaml
 
-For updates to **chain** across releases, evolve a single baseline pack rather than
-re-creating it each time (each `create` mints a new key, and a patch is tied to
-its pack's key):
-```bash
-cp baseline.sealpack prev.sealpack          # snapshot the last release
-# … add/replace models in baseline.sealpack …
-sealpack diff prev.sealpack baseline.sealpack update.spkpatch
+# device: overlay it — same paths overwrite, new paths are added, rest untouched
+sealpack merge deployed.spk update.spk
 ```
+Because the update carries whole files (not byte-deltas), `merge` is a **base-
+independent overlay**: it applies to any version of the pack and re-merging is a
+harmless no-op. The update pack is itself encrypted, and you can inspect it with
+any command (`sealpack ls update.spk`). On device, the runtime calls
+`sealpack_merge()`.
+
+**Deleting files.** A pack can't say "delete", so put the removals in a reserved
+`.spkdel` file inside the update pack (one path per line) — `merge` applies them
+and doesn't merge the file itself:
+```bash
+printf 'models/old.axmodel\ncfg/stale.yaml\n' > dellist.txt
+sealpack add update.spk .spkdel dellist.txt        # or: sealpack edit update.spk .spkdel
+```
+Or delete ad-hoc at merge time: `sealpack merge deployed.spk update.spk -d models/old.axmodel`.
 
 ## On-disk format
 

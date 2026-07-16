@@ -118,20 +118,15 @@ int sealpack_stat(sealpack_t* sp, const char* path, sealpack_entry* out);
 // Atomic: writes a new file and swaps it in, so a crash keeps the old one.
 int sealpack_compact(sealpack_t* sp);
 
-// ---- incremental update (ship a delta, not the whole pack) ------------------
+// ---- incremental update (merge a small pack, not the whole thing) -----------
 
-// Apply a `.spkpatch` (produced by `sealpack diff` / sealpack_create_patch) to
-// this pack in place: the changed files are set, the removed ones deleted, then
-// committed atomically. It's a base-independent overlay — it applies to any
-// version of the pack and is idempotent. The patch is encrypted under this pack's
-// master key, so a patch for a different pack returns SEALPACK_ERR_AUTH. This is
-// the on-device path: download a small patch, apply it, no full re-push.
-int sealpack_apply_patch(sealpack_t* sp, const void* patch, size_t size);
-
-// Producer side: write a patch that turns `base` into `newer` into a freshly
-// malloc'd buffer (*out, *size); free with sealpack_free. Carries only the files
-// that differ, encrypted under `base`'s master key.
-int sealpack_create_patch(sealpack_t* base, sealpack_t* newer, void** out, size_t* size);
+// Overlay every file from `source` onto `target`: same path overwrites, new path
+// is added, everything else is left alone (base-independent, idempotent). A
+// "patch" is just a small pack containing the files to update. Buffered like
+// sealpack_put — call sealpack_commit after. This is the on-device path: download
+// a small update pack, open it, merge it in, no full re-push. Deletions ride
+// along: a ".spkdel" file in `source` lists paths to remove (one per line).
+int sealpack_merge(sealpack_t* target, sealpack_t* source);
 
 // ---- password ---------------------------------------------------------------
 // Data is under a random master key; the password only wraps it into an 88-byte
