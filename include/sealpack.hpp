@@ -62,14 +62,14 @@ public:
 
     // ---- incremental update: ship a delta, not the whole pack ----
     // create_patch: *this is the OLD/base state, `newer` the target. Writes an
-    // encrypted patch (into *out) that turns this pack's logical content into
-    // `newer`'s — it carries only the files that differ, plus the deletions. The
-    // patch is encrypted under THIS pack's master key, so it's confidential and
-    // binds to this base (a device with this pack's password can apply it, and a
-    // patch for a different pack simply won't decrypt).
-    // apply_patch: apply such a patch to *this in place (put/del + commit). It
-    // refuses unless this pack's logical state matches the base the patch was
-    // built from (like `git apply`), so you can't patch the wrong version.
+    // encrypted patch (into *out) carrying only the files that differ (as whole
+    // new contents) plus the deletions. Encrypted under THIS pack's master key, so
+    // it's confidential and bound to this pack family (a patch for a different pack
+    // won't decrypt).
+    // apply_patch: overlay the patch onto *this in place (set the changed files,
+    // delete the removed ones, leave the rest; then commit). Base-independent —
+    // it applies to any version of the pack and is idempotent — because a
+    // file-level patch carries absolute content, not byte-deltas.
     bool create_patch(const Pack& newer, std::string* out) const;
     bool apply_patch(const std::string& patch);
 

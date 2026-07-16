@@ -393,46 +393,56 @@ callback returns bare leaf segments; linenoise rebuilds `<prefix> + <candidate>`
 
 ## 16. Incremental update (`.spkpatch`)
 
-Ship a *delta*, not the whole pack. `diff old new` builds a small patch carrying
-only the files that changed; `patch pack file.spkpatch` merges it into a deployed
-pack in place. This is the on-device update path (the runtime downloads a patch
-and calls `sealpack_apply_patch`) — no re-pushing a multi-GB `.spk`.
+Ship a *delta*, not the whole pack. `diff old new` builds a small patch of the
+files that changed; `apply pack file.spkpatch` overlays it onto a deployed pack in
+place. This is the on-device update path (the runtime downloads a patch and calls
+`sealpack_apply_patch`) — no re-pushing a multi-GB `.spk`.
 
 **File-level, deliberately — not byte/char-level.** The payload is opaque binary
-models (`.axmodel` etc.) that are re-exported wholesale on every update: a new
-version is ~entirely different bytes from the old, so a byte-level (bsdiff/git-
-style) delta would be ≈ the full file — no gain — while breaking the content-
-addressed model (blob = whole-content hash, stored once, random-access decrypt)
-and adding a heavy delta dependency. The real win is already at file granularity:
-update 1 of N models → ship 1, not N. (If updates ever became fine-tunes with
-mostly-identical bytes, *content-defined chunking* — not char-diff — would be the
-tool; layer it under the same command then.)
+models (`.axmodel` etc.) re-exported wholesale on every update: a new version is
+~entirely different bytes from the old, so a byte-level (bsdiff/git-style) delta
+would be ≈ the full file — no gain — while breaking the content-addressed model
+(blob = whole-content hash, stored once, random-access decrypt) and adding a heavy
+delta dependency. The win is already at file granularity: update 1 of N models →
+ship 1, not N. (If updates ever became fine-tunes with mostly-identical bytes,
+*content-defined chunking* — not char-diff — would be the tool; layer it under the
+same command then.)
 
-**What the patch contains** (`create_patch`/`apply_patch` in `pack.cpp`): the
-paths whose content changed or is new (each shipped once as plaintext, deduped by
-hash), plus the list of removed paths, plus a fingerprint of the base's logical
-state. On-disk: `"SPKPATCH"` + version + a length-prefixed META record, then one
-record per shipped blob — every record AEAD-sealed under the **base pack's master
-key**.
+**Base-independent overlay.** Because a file-level patch carries *absolute*
+content (whole new files), not byte-deltas, applying it doesn't depend on the
+target being any specific version. `apply_patch` just sets the changed files,
+deletes the removed ones, and leaves everything else — so one patch applies to any
+version of the pack, is **idempotent** (re-applying is a no-op), and never
+half-transforms. (An earlier cut hard-refused unless the target matched the exact
+base the diff was built from, like `git apply`; that version-lock was dropped as
+over-restrictive for absolute-content patches — a byte-delta would need it, this
+doesn't.) Trade-off: applying patches *out of order* silently merges instead of
+refusing — fine for forward updates to read-only devices.
 
-**Two independent safety guards:**
-- *Confidentiality + wrong-pack rejection* — the patch is encrypted under the
-  base's master key. A device decrypts it with its own pack's key (same key,
-  since the device pack IS a copy of the base). A patch for a different pack has a
-  different master key → it simply won't decrypt (`SEALPACK_ERR_AUTH`). Each
-  `create` mints a random master key, so this binds a patch to its exact pack
-  lineage, independent of the password.
-- *Wrong-base rejection* — the patch stores `logical_fingerprint(base)` (BLAKE2b
-  over the sorted path→content-hash map, ignoring physical layout so a compacted
-  copy still matches). `apply_patch` refuses unless the target's current
-  fingerprint equals it (`SEALPACK_ERR_PATCH`), like `git apply`. This also makes
-  double-apply and out-of-order patches fail safely.
+**What binds a patch to a pack** is confidentiality, not version: every record is
+AEAD-sealed under the **base pack's master key**, so a patch for a different pack
+simply won't decrypt (`SEALPACK_ERR_AUTH`). Each `create` mints a random master
+key, so this ties a patch to its pack *lineage* independent of the password.
 
-Apply verifies every shipped blob against its declared content hash (the CAS
-invariant) before writing, then does the puts/dels and **one** `commit()` (the
-usual crash-safe point — a power loss mid-apply leaves the pre-patch state).
+**Format** (`create_patch`/`apply_patch` in `pack.cpp`): `"SPKPATCH"` + version +
+a length-prefixed META record, then one record per shipped blob, all sealed under
+the master key. META = `{nblobs: hash+len}` + `{nputs: path+hash}` +
+`{ndels: path}`. Changed/new blobs are shipped once, deduped by hash. Apply
+verifies every blob against its content hash (the CAS invariant) before writing,
+then does the puts/dels and **one** `commit()` (the crash-safe point — a power
+loss mid-apply leaves the pre-patch state).
 
-CLI: `diff` opens two packs so it's one-shot only (prompts for each password, or
-`$SEALPACK_PASSWORD` for both when non-TTY); `patch` is a normal `do_command`
-verb (works in the shell too). C ABI: `sealpack_apply_patch` (device side) +
-`sealpack_create_patch`.
+**Chaining across releases — evolve one baseline, don't re-`create`.** A patch is
+sealed under, and applies under, one master key; the device's master key never
+changes across updates. So the producer must keep a **single baseline pack**
+(stable master key) and evolve it per release — snapshot it, mutate the working
+copy, `diff snapshot working`. If instead each version is a fresh `create` (new
+random key), a patch built from one won't decrypt on a device carrying another's
+key. In the evolve workflow there is one key and one password throughout, so the
+two packs a `diff` opens never mismatch.
+
+CLI: `diff` opens two packs so it's **one-shot only** (a producer op; direction is
+explicit `old new`) — prompts for each password on a TTY, else `$SEALPACK_PASSWORD`
+for old and `$SEALPACK_PASSWORD_NEW` for new (falls back to the former). `apply` is
+a normal `do_command` verb (works in the shell too). C ABI: `sealpack_apply_patch`
+(device side) + `sealpack_create_patch`.

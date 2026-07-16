@@ -28,7 +28,7 @@ one file, encrypted, deduplicated, and safe across power loss.
 | **Change password** | `rekey` re-wraps the master key under a new password — one 88B slot rewritten, the data blobs never move, so it's instant on a multi-GB pack |
 | **Deduplicated** | content-addressed (BLAKE2b): identical bytes stored once; `move`/`copy` are O(1) |
 | **Crash-safe** | append-only + atomic double-superblock commit — a power loss leaves the old state or the new one, never half-written |
-| **Incremental update** | `diff` builds a small `.spkpatch` of just the changed files; `patch` merges it into a deployed pack in place — ship a delta, not a multi-GB re-push. Encrypted under the pack's key and bound to its exact base version |
+| **Incremental update** | `diff` builds a small `.spkpatch` of just the changed files; `apply` overlays it onto a deployed pack in place — ship a delta, not a multi-GB re-push. Encrypted under the pack's key; base-independent and idempotent |
 | **Two APIs** | C++ `Pack` class (core) + C ABI (`sealpack.h`) wrapper for FFI |
 | **File-manager ready** | filesystem-style paths, `move`/`copy`/`list`(size+mtime)/`stat` — a UI splits paths on `/` into a folder tree |
 
@@ -80,17 +80,27 @@ sealpack web    models.sealpack                     # browser file-manager (+ ch
 ## Incremental updates
 
 Updated one model in a shipped pack? Send a patch, not the whole pack. `diff`
-compares old→new and writes a `.spkpatch` with only the changed files; `patch`
-merges it into the deployed pack in place.
+compares old→new and writes a `.spkpatch` with only the changed files; `apply`
+overlays it onto the deployed pack in place.
 ```bash
 sealpack diff  v1.sealpack v2.sealpack update.spkpatch   # producer: build the delta
-sealpack patch deployed.sealpack update.spkpatch         # device: apply it (only the delta)
+sealpack apply deployed.sealpack update.spkpatch         # device: overlay it (only the delta)
 ```
-The patch is encrypted under the pack's own key (a patch for a different pack
-won't decrypt) and refuses to apply unless the target is the exact base it was
-built from — so you can't patch the wrong version. On device, the runtime calls
-`sealpack_apply_patch()`. It's **file-level** (whole changed files): the payload
-is binary models re-exported wholesale, so a byte-level diff would save nothing.
+It's **file-level** (whole changed files: the payload is binary models re-exported
+wholesale, so a byte-level diff would save nothing) and therefore a **base-
+independent overlay** — it sets the changed files and leaves the rest, so one
+patch applies to any version of the pack and re-applying is a harmless no-op. The
+patch is encrypted under the pack's own key, so a patch for a different pack won't
+decrypt. On device, the runtime calls `sealpack_apply_patch()`.
+
+For updates to **chain** across releases, evolve a single baseline pack rather than
+re-creating it each time (each `create` mints a new key, and a patch is tied to
+its pack's key):
+```bash
+cp baseline.sealpack prev.sealpack          # snapshot the last release
+# … add/replace models in baseline.sealpack …
+sealpack diff prev.sealpack baseline.sealpack update.spkpatch
+```
 
 ## On-disk format
 

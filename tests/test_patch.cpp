@@ -74,13 +74,17 @@ TEST_MAIN("patch") {
         CHECK(s == "C-new");
     }
 
-    // ---- double-apply is refused: kOld's state is now "new", the patch's base
-    // is "old" → logical fingerprint mismatch (SEALPACK_ERR_PATCH) ----
+    // ---- base-independent + idempotent: re-applying the same patch to kOld
+    // (now already at new's state, i.e. NOT the base it was built from) is a
+    // clean no-op overlay, not a refusal ----
     {
         auto dev = Pack::open(kOld, "pw");
         CHECK(dev != nullptr);
-        CHECK(!dev->apply_patch(patch));
-        CHECK_EQ(dev->last_error(), SEALPACK_ERR_PATCH);
+        CHECK(dev->apply_patch(patch));                     // succeeds (overlay)
+        CHECK_EQ(dev->list().size(), static_cast<size_t>(6));
+        std::string s;
+        CHECK(dev->get("models/a.axmodel", &s)); CHECK(s == "A-v2-completely-different");
+        CHECK(!dev->has("stale.txt"));
     }
 
     // ---- wrong pack: kNew has a different master key → the patch (sealed under

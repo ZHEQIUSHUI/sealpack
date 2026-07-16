@@ -6,11 +6,11 @@ reference). Commit hashes are on `ZHEQIUSHUI/sealpack`.
 
 ---
 
-## 2026-07-16 — incremental update: `diff` / `patch` (`.spkpatch`)
+## 2026-07-16 — incremental update: `diff` / `apply` (`.spkpatch`)
 
 So a shipped pack can be updated by sending only the changed files, not a whole
-re-push or loose sub-files. `diff old new out.spkpatch` builds the delta; `patch
-pack out.spkpatch` merges it in place. C ABI `sealpack_apply_patch` is the
+re-push or loose sub-files. `diff old new out.spkpatch` builds the delta; `apply
+pack out.spkpatch` overlays it in place. C ABI `sealpack_apply_patch` is the
 on-device path (the runtime downloads a patch and applies it).
 
 - **File-level, decided with the user.** Their model updates are whole re-exports
@@ -19,23 +19,37 @@ on-device path (the runtime downloads a patch and applies it).
   ≈ the full file and would break the content-addressed model. File granularity
   captures the real win (ship 1 of N models). Noted CDC as the tool *if* updates
   ever become fine-tunes. See DESIGN §16.
-- **Design.** Patch = changed paths (shipped once as plaintext, deduped by hash)
-  + deletions + a fingerprint of the base's logical state, all AEAD-sealed under
-  the **base pack's master key**. Two guards: wrong pack → won't decrypt
-  (`ERR_AUTH`, since every pack has a random master key); wrong base →
-  `logical_fingerprint` mismatch (`ERR_PATCH`, like `git apply`; also blocks
-  double-apply). Apply re-verifies each blob's content hash, then one `commit()`.
+- **Base-independent overlay (a mid-build correction).** First cut stored a
+  `logical_fingerprint(base)` and hard-refused unless the target matched it
+  exactly, like `git apply`. The user pushed back: a *file-level* patch carries
+  absolute content, so it shouldn't be version-locked. Right — dropped the
+  fingerprint. `apply` now just sets the changed files / deletes the removed ones
+  / leaves the rest: applies to **any** version of the pack, **idempotent**, and
+  one patch can update devices at different states. Kept the master-key seal
+  (confidentiality + pack-lineage binding — wrong pack won't decrypt, `ERR_AUTH`);
+  removed the now-unused `ERR_PATCH`. Trade-off noted: out-of-order application
+  silently merges instead of refusing (fine for forward-only, read-only devices).
+- **Naming.** `patch` → `apply` (user's call): clearer for non-VCS folks, matches
+  the C API `sealpack_apply_patch`, and avoids `merge`'s false implication of
+  conflict resolution (there is none — it's a straight overlay).
+- **Chaining needs a stable master key.** Surfaced while working through the
+  password questions: a patch is sealed under one master key and the device's key
+  never changes, so the producer must **evolve one baseline pack**, not re-`create`
+  each release (a fresh key breaks the chain). In that workflow there's one key +
+  one password throughout, so `diff`'s two packs never mismatch. Documented the
+  workflow (DESIGN §16, README). Non-TTY `diff` now takes `$SEALPACK_PASSWORD` +
+  optional `$SEALPACK_PASSWORD_NEW`.
 - **Surfaced a real Windows/Linux difference.** The first test opened the *same*
   pack file twice read-write; POSIX allows it (green on Linux) but `os_win32` uses
   `FILE_SHARE_READ` only → second open fails → null deref → crash under wine.
   Fixed the test (concurrent multi-writer is a non-goal); added the gotcha to
   DESIGN §12.
-- **Validated.** New `test_patch` (38 checks: round-trip with change/add/delete/
-  dedup, deletion propagation, double-apply refusal, wrong-key refusal, empty
-  no-op) — green on Linux and under wine; a CLI `diff`→`patch` round-trip also
-  verified under wine (232 B patch vs the full pack). A real update ships only the
-  changed model: in a smoke test a 4-file change produced a 553 B patch against a
-  2.5 KB pack.
+- **Validated.** `test_patch` (round-trip with change/add/delete/dedup, deletion
+  propagation, idempotent re-apply, wrong-key refusal, empty no-op) — green on
+  Linux and under wine. CLI checks: a patch built v1→v2 (only file `a` changed)
+  applied cleanly onto a same-family pack whose `b` had been changed independently
+  — `a` overlaid, `b` preserved — proving base-independence; wrong-pack still
+  refused. A 4-file change produced a 553 B patch against a 2.5 KB pack.
 
 ---
 

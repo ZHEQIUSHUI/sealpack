@@ -157,7 +157,6 @@ const char* sealpack_strerror(int status) {
         case SEALPACK_ERR_NOMEM:   return "out of memory";
         case SEALPACK_ERR_ARG:     return "bad argument";
         case SEALPACK_ERR_EXISTS:  return "already exists";
-        case SEALPACK_ERR_PATCH:   return "patch does not apply to this pack";
         default:                   return "unknown error";
     }
 }

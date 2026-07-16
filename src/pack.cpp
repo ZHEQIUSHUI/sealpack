@@ -17,11 +17,13 @@ uint64_t now_sec() { return os::now_seconds(); }
 constexpr size_t kRecOverhead = kNonceBytes + kMacBytes;
 
 // ---- patch (incremental update) format ----
-// A .spkpatch turns one pack's logical content into another's, carrying only the
-// files that differ. Layout: "SPKPATCH" + version + a length-prefixed META record
+// A .spkpatch carries the files that differ between two packs, as ABSOLUTE
+// content (whole new files, not byte-deltas) — so it applies as a base-INDEPENDENT
+// overlay: set these paths, delete those, leave the rest. Idempotent, works on any
+// version of the pack. Layout: "SPKPATCH" + version + a length-prefixed META record
 // then one record per shipped blob, every record AEAD-sealed under the BASE pack's
-// master key (nonce|mac|cipher). META plaintext:
-//   base_fp(32)                                  BLAKE2b of the base's logical state
+// master key (nonce|mac|cipher) — that seal is the confidentiality + pack-family
+// binding (a patch for a different pack won't decrypt). META plaintext:
 //   u32 nblobs; { hash(32); u64 plain_len }      shipped blobs, ordered by hash
 //   u32 nputs;  { u32 plen; path; hash(32) }     path -> content assignments
 //   u32 ndels;  { u32 plen; path }               removed paths
@@ -43,20 +45,6 @@ bool get_u64(const uint8_t* d, size_t n, size_t& p, uint64_t& v) {
 bool get_bytes(const uint8_t* d, size_t n, size_t& p, size_t len, std::string& out) {
     if (p + len > n) return false;
     out.assign(reinterpret_cast<const char*>(d) + p, len); p += len; return true;
-}
-
-// Canonical hash of a pack's LOGICAL content (path -> content hash), ignoring
-// physical layout (offsets, mtimes). Two logically-identical packs — even if one
-// was compacted — fingerprint the same, so a patch still applies across copies.
-void logical_fingerprint(const Index& idx, uint8_t out[kHashBytes]) {
-    std::string s;
-    put_u32(s, static_cast<uint32_t>(idx.paths.size()));
-    for (const auto& kv : idx.paths) {   // std::map → sorted, deterministic
-        put_u32(s, static_cast<uint32_t>(kv.first.size()));
-        s += kv.first;
-        s += kv.second.hash;             // 32-byte content hash
-    }
-    content_hash(out, reinterpret_cast<const uint8_t*>(s.data()), s.size());
 }
 
 // One AEAD record (nonce|mac|cipher) under `key`, into a fresh string. Empty on
@@ -442,10 +430,7 @@ bool Pack::create_patch(const Pack& newer, std::string* out) const {
             dels.push_back(kv.first);
 
     // META plaintext.
-    uint8_t base_fp[kHashBytes];
-    logical_fingerprint(base.index, base_fp);
     std::string meta;
-    meta.append(reinterpret_cast<const char*>(base_fp), kHashBytes);
     put_u32(meta, static_cast<uint32_t>(blobs.size()));
     for (const auto& kv : blobs) { meta += kv.first; put_u64(meta, kv.second.size()); }
     put_u32(meta, static_cast<uint32_t>(puts.size()));
@@ -490,12 +475,6 @@ bool Pack::apply_patch(const std::string& patch) {
     const uint8_t* m = reinterpret_cast<const uint8_t*>(meta.data());
     const size_t   mn = meta.size();
     size_t mp = 0;
-    std::string base_fp;
-    if (!get_bytes(m, mn, mp, kHashBytes, base_fp)) { im.last_err = SEALPACK_ERR_CORRUPT; return false; }
-
-    uint8_t cur_fp[kHashBytes];   // refuse unless our logical state == the patch's base
-    logical_fingerprint(im.index, cur_fp);
-    if (std::memcmp(base_fp.data(), cur_fp, kHashBytes) != 0) { im.last_err = SEALPACK_ERR_PATCH; return false; }
 
     uint32_t nblobs;
     if (!get_u32(m, mn, mp, nblobs)) { im.last_err = SEALPACK_ERR_CORRUPT; return false; }
@@ -538,7 +517,10 @@ bool Pack::apply_patch(const std::string& patch) {
         blobs.emplace(b.first, std::move(plain));
     }
 
-    // Apply, then one atomic commit. (put/del buffer; commit is the crash-safe point.)
+    // Overlay onto whatever this pack currently is: set the shipped files, delete
+    // the listed ones, leave everything else. Base-independent and idempotent (a
+    // re-apply just re-sets identical content and deletes already-gone paths).
+    // One atomic commit at the end (put/del buffer; commit is the crash-safe point).
     for (const auto& pr : puts) {
         auto it = blobs.find(pr.second);
         if (it == blobs.end()) { im.last_err = SEALPACK_ERR_CORRUPT; return false; }  // put references an unshipped blob
