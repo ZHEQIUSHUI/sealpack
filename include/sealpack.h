@@ -101,8 +101,10 @@ int sealpack_commit(sealpack_t* sp);
 // ---- listing / maintenance --------------------------------------------------
 
 typedef struct {
-    const char* path;   // owned by sp — valid until close/next mutation
-    size_t      size;   // plaintext size
+    const char* path;   // owned by sp — invalidated by close, the next mutation, OR
+                        // the next sealpack_list/sealpack_stat on the same handle
+                        // (they reuse one cache). Copy it if you need to keep it.
+    uint64_t    size;   // plaintext size (u64: a logical file may exceed 4 GiB)
     uint64_t    mtime;  // last-written unix seconds (UI "modified" column)
 } sealpack_entry;
 

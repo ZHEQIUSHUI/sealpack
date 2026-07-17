@@ -36,6 +36,11 @@ bool encrypt_append(Store& st, const uint8_t key[kKeyBytes],
 // Read + decrypt a record into *out. false = I/O or auth failure.
 bool read_decrypt(Store& st, const uint8_t key[kKeyBytes], const BlobRef& ref,
                   std::string* out) {
+    // A record is nonce|mac|cipher, so enc_size must be exactly plain_size + 40.
+    // Enforce it before sizing/decrypting — a crafted manifest could otherwise set
+    // plain_size > enc_size-40 and make aead_decrypt read past the `rec` buffer.
+    if (ref.enc_size < kRecOverhead || ref.plain_size != ref.enc_size - kRecOverhead)
+        return false;
     std::string rec(ref.enc_size, '\0');
     if (!st.read_at(ref.offset, &rec[0], ref.enc_size)) return false;
     const uint8_t* p = reinterpret_cast<const uint8_t*>(rec.data());
@@ -319,13 +324,19 @@ bool Pack::compact() {
 
     if (!flush_manifest(*ns, im.key, nidx)) { im.last_err = SEALPACK_ERR_IO; return false; }
     ns.reset();          // close the new file
-    im.store.reset();    // close the old file
+    im.store.reset();    // close the old file (Windows won't replace an open file)
 
+    // If the replace fails, the ORIGINAL is still intact at im.path — reopen it so
+    // this Pack stays usable (index is still the old one) instead of holding a null
+    // store that would crash the next call.
     if (!os::rename_replace(tmp.c_str(), im.path.c_str())) {  // atomic replace
-        im.last_err = SEALPACK_ERR_IO; return false;
+        os::remove_file(tmp.c_str());
+        im.store = Store::open(im.path, im.key);
+        im.last_err = SEALPACK_ERR_IO;
+        return false;
     }
-    auto reopened = Store::open(im.path, im.key);
-    if (!reopened) { im.last_err = SEALPACK_ERR_IO; return false; }
+    auto reopened = Store::open(im.path, im.key);   // now the compacted file
+    if (!reopened) { im.last_err = SEALPACK_ERR_IO; return false; }  // on-disk is valid; caller should reopen
     im.store = std::move(reopened);
     im.index = std::move(nidx);
     im.last_err = SEALPACK_OK;

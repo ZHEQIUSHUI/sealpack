@@ -57,6 +57,32 @@ int main(void) {
     sealpack_free(out);
     sealpack_close(sp);
 
+    // ---- merge: overlay a small "patch" pack (overwrite + add + .spkdel delete) ----
+    const char* upath = "sealpack_test_capi_update.spk";
+    remove(upath);
+    sealpack_t* up = sealpack_create(upath, "hunter2");
+    CHECK(up != NULL);
+    CHECK(sealpack_put(up, "b/x.bin", "WORLD", 5) == SEALPACK_OK);        // overwrite
+    CHECK(sealpack_put(up, "new.bin", "NEW", 3) == SEALPACK_OK);          // add
+    CHECK(sealpack_put(up, ".spkdel", "a/y.bin\n", 8) == SEALPACK_OK);    // remove a/y.bin
+    CHECK(sealpack_commit(up) == SEALPACK_OK);
+
+    sp = sealpack_open(path, "hunter2");
+    CHECK(sp != NULL);
+    CHECK(sealpack_merge(sp, up) == SEALPACK_OK);   // buffered; commit persists it
+    CHECK(sealpack_commit(sp) == SEALPACK_OK);
+    sealpack_close(up);
+
+    CHECK(sealpack_get(sp, "b/x.bin", &out, &n) == SEALPACK_OK);
+    CHECK(n == 5 && memcmp(out, "WORLD", 5) == 0);  // overwritten by the patch
+    sealpack_free(out);
+    CHECK(sealpack_has(sp, "new.bin") == 1);        // added
+    CHECK(sealpack_has(sp, "a/y.bin") == 0);        // deleted via .spkdel
+    CHECK(sealpack_has(sp, ".spkdel") == 0);        // control file consumed, not merged
+    CHECK(sealpack_has(sp, "a/z.bin") == 1);        // untouched
+    sealpack_close(sp);
+    remove(upath);
+
     remove(path);
     fprintf(stderr, "[capi] %d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;

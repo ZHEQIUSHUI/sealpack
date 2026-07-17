@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <cstdio>   // rename
 #include <ctime>
+#include <string>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -78,7 +79,24 @@ bool sync_file(handle_t h) {
 bool remove_file(const char* path) { return ::unlink(path) == 0; }
 
 bool rename_replace(const char* from, const char* to) {
-    return ::rename(from, to) == 0;   // POSIX rename() already replaces the target
+    if (::rename(from, to) != 0) return false;   // atomic replace
+    // ...but not durable on its own: a power loss right after rename() can lose the
+    // new directory entry. fsync the containing directory to match Win32's
+    // MOVEFILE_WRITE_THROUGH. (Best-effort — a failure here doesn't undo the rename.)
+    std::string dir(to);
+    const auto slash = dir.find_last_of('/');
+    dir = (slash == std::string::npos) ? std::string(".")
+        : (slash == 0 ? std::string("/") : dir.substr(0, slash));
+    int flags = O_RDONLY;
+#ifdef O_DIRECTORY
+    flags |= O_DIRECTORY;
+#endif
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+    int dfd = ::open(dir.c_str(), flags);
+    if (dfd >= 0) { ::fsync(dfd); ::close(dfd); }
+    return true;
 }
 
 uint64_t now_seconds() { return static_cast<uint64_t>(::time(nullptr)); }

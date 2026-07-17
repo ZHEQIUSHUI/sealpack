@@ -3,6 +3,7 @@
 
 #include "sealpack.h"
 
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -96,7 +97,7 @@ int sealpack_compact(sealpack_t* sp) {
 }
 
 int sealpack_merge(sealpack_t* target, sealpack_t* source) {
-    if (!target || !source) return SEALPACK_ERR_ARG;
+    if (!target || !source || target == source) return SEALPACK_ERR_ARG;
     return target->pack->merge(*source->pack) ? SEALPACK_OK : target->pack->last_error();
 }
 
@@ -109,6 +110,7 @@ int sealpack_list(sealpack_t* sp, sealpack_entry** entries, size_t* count) {
     if (!sp || !entries || !count) return SEALPACK_ERR_ARG;
     sp->list_cache = sp->pack->list();
     const size_t n = sp->list_cache.size();
+    if (n > SIZE_MAX / sizeof(sealpack_entry)) return SEALPACK_ERR_NOMEM;   // overflow guard
     auto* arr = static_cast<sealpack_entry*>(std::malloc((n ? n : 1) * sizeof(sealpack_entry)));
     if (!arr) return SEALPACK_ERR_NOMEM;
     for (size_t i = 0; i < n; ++i) {

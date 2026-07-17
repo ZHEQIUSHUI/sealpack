@@ -168,6 +168,9 @@ static int do_command(Pack* pk, const std::vector<std::string>& a) {
         return 0;
     }
     if (c == "merge" && a.size() >= 2) {   // overlay a source pack's files onto the open pack
+        if (a[1].empty() || a[1][0] == '-') {   // a[1] must be the source pack, not a flag
+            std::fprintf(stderr, "usage: merge <source.spk> [-d <path>]...\n"); return 1;
+        }
         std::vector<std::string> dels;     // optional  -d <path>  removals
         for (size_t i = 2; i < a.size(); ++i) {
             if (a[i] == "-d" && i + 1 < a.size()) dels.push_back(a[++i]);
@@ -186,7 +189,8 @@ static int do_command(Pack* pk, const std::vector<std::string>& a) {
             src = Pack::open(a[1], spw);
         }
         if (!src) { std::fprintf(stderr, "merge: open %s failed (wrong password or missing)\n", a[1].c_str()); return 1; }
-        const size_t n = src->list().size();
+        size_t n = 0;   // count the files actually overlaid (the .spkdel list isn't one)
+        for (const auto& e : src->list()) if (e.path != ".spkdel") ++n;
         if (!pk->merge(*src)) { std::fprintf(stderr, "merge failed\n"); return 1; }
         for (const auto& d : dels) pk->del(d);   // also delete (ignore already-absent)
         if (!pk->commit()) { std::fprintf(stderr, "merge: commit failed\n"); return 1; }
@@ -199,6 +203,7 @@ static int do_command(Pack* pk, const std::vector<std::string>& a) {
         const std::string n2 = read_password("confirm new password: ");
         if (n1 != n2) { std::fprintf(stderr, "new passwords don't match\n"); return 1; }
         if (!pk->rekey(n1)) { std::fprintf(stderr, "rekey failed\n"); return 1; }
+        g_session_password = n1;   // keep it in sync so a later `merge` still reuses it
         std::fprintf(stderr, "password changed; the old one no longer opens this pack\n");
         return 0;
     }

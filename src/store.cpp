@@ -177,7 +177,9 @@ std::unique_ptr<Store> Store::open(const std::string& path, const uint8_t master
     else                           { slot = 1; seq = sB; off = oB; len = lB; }
 
     int64_t end = os::file_size(fd);
-    if (end < static_cast<int64_t>(kDataStart)) end = static_cast<int64_t>(kDataStart);
+    if (end < 0) { os::close_file(fd); return nullptr; }   // size unknown → refuse, don't
+    if (end < static_cast<int64_t>(kDataStart))            // guess and later overwrite data
+        end = static_cast<int64_t>(kDataStart);
 
     std::unique_ptr<Store> st(new Store);
     st->impl_->fd = fd;

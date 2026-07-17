@@ -7,6 +7,7 @@
 
 #include "platform.hpp"
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -54,10 +55,19 @@ std::string temp_dir() {
 
 bool edit_in_editor(const std::string& name_hint, const std::string& data,
                     std::string* out) {
+    // Keep the pack path's extension so the editor picks the right syntax mode —
+    // but the path is UNTRUSTED (a hostile .spk can name a file anything), and it
+    // ends up in a shell command below. Only accept a plain, short extension
+    // (letters/digits/._-); anything else (e.g. a quote, ';', space) is dropped.
     std::string ext;
     const auto dot = name_hint.find_last_of('.'), slash = name_hint.find_last_of('/');
-    if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
-        ext = name_hint.substr(dot);
+    if (dot != std::string::npos && (slash == std::string::npos || dot > slash)) {
+        const std::string e = name_hint.substr(dot);
+        bool safe = e.size() >= 2 && e.size() <= 16;
+        for (char c : e)
+            if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '_' || c == '-')) { safe = false; break; }
+        if (safe) ext = e;
+    }
 
     std::string tmpl = temp_dir() + "/sealpack-edit-XXXXXX" + ext;
     std::vector<char> t(tmpl.begin(), tmpl.end());
@@ -74,7 +84,13 @@ bool edit_in_editor(const std::string& name_hint, const std::string& data,
         const char* ed = ::getenv("VISUAL");
         if (!ed || !*ed) ed = ::getenv("EDITOR");
         if (!ed || !*ed) ed = "vi";
-        const std::string cmd = std::string(ed) + " '" + path + "'";
+        // Single-quote the path and escape any embedded ' as '\'' — never let the
+        // path break out of the quoting into the shell (defense in depth on top of
+        // the sanitized extension above; $EDITOR itself is trusted, may carry args).
+        std::string q = "'";
+        for (char c : path) q += (c == '\'') ? std::string("'\\''") : std::string(1, c);
+        q += "'";
+        const std::string cmd = std::string(ed) + " " + q;
         // Only read back on a clean editor exit — a crash / `:cq` abort (non-zero
         // exit) must not persist a truncated buffer into the pack.
         const int rc = ::system(cmd.c_str());

@@ -31,6 +31,18 @@ std::string gen_token() {
     return s;
 }
 
+// A safe value for the Content-Disposition filename="…" quoted-string. The pack
+// path is UNTRUSTED (a hostile .spk can name a file with CR/LF/NUL/quotes); those
+// would inject HTTP headers / break the quoting, so replace anything that isn't a
+// plain printable filename char with '_'.
+std::string safe_filename(const std::string& s) {
+    std::string o;
+    for (unsigned char c : s)
+        o += (c < 0x20 || c == 0x7f || c == '"' || c == '\\' || c == '/') ? '_' : static_cast<char>(c);
+    if (o.empty()) o = "download";
+    return o;
+}
+
 std::string json_escape(const std::string& s) {
     std::string o;
     for (char c : s) {
@@ -272,9 +284,14 @@ int run_web(Pack* pack, const std::string& pack_path,
     if (token.empty()) { std::fprintf(stderr, "sealpack web: RNG failed, refusing to start\n"); return 1; }
     httplib::Server srv;
 
+    auto ct_eq = [](const std::string& a, const std::string& b) {  // constant-time
+        return a.size() == b.size() &&
+               sealpack::ct_equal(reinterpret_cast<const uint8_t*>(a.data()),
+                                  reinterpret_cast<const uint8_t*>(b.data()), a.size()) == 1;
+    };
     auto authed = [&](const httplib::Request& req) {
-        return req.get_header_value("X-Sealpack-Token") == token ||
-               req.get_param_value("t") == token;
+        return ct_eq(req.get_header_value("X-Sealpack-Token"), token) ||
+               ct_eq(req.get_param_value("t"), token);
     };
 
     srv.Get("/", [&](const httplib::Request&, httplib::Response& res) {
@@ -307,7 +324,8 @@ int run_web(Pack* pack, const std::string& pack_path,
         if (!pack->get(path, &data)) { res.status = 404; res.set_content("not found", "text/plain"); return; }
         const auto slash = path.find_last_of('/');
         const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
-        res.set_header("Content-Disposition", "attachment; filename=\"" + name + "\"");
+        res.set_header("Content-Disposition", "attachment; filename=\"" + safe_filename(name) + "\"");
+        res.set_header("X-Content-Type-Options", "nosniff");
         res.set_content(data, "application/octet-stream");
     });
 
@@ -316,6 +334,7 @@ int run_web(Pack* pack, const std::string& pack_path,
     // Text is capped so a giant log can't hang the tab; images serve whole.
     srv.Get("/api/view", [&](const httplib::Request& req, httplib::Response& res) {
         if (!authed(req)) { res.status = 403; return; }
+        res.set_header("X-Content-Type-Options", "nosniff");  // never let the browser sniff text→html
         const std::string path = req.get_param_value("path");
         std::lock_guard<std::mutex> lk(mu);
         std::string data;

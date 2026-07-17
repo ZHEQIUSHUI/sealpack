@@ -27,3 +27,23 @@ jobs:
 
       - name: test
         run: ctest --test-dir build --build-config Release --output-on-failure
+
+  # Address + UndefinedBehavior sanitizers on Linux — catches OOB reads/writes,
+  # use-after-free, and UB the Release matrix can't. Runs the full ctest suite
+  # (incl. the CLI smoke) instrumented.
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure (ASan + UBSan)
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all"
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all"
+      - name: build
+        run: cmake --build build -j
+      - name: test
+        run: ctest --test-dir build --output-on-failure
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1

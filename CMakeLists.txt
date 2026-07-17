@@ -10,6 +10,12 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# 64-bit file offsets everywhere (harmless on 64-bit / MSVC): on 32-bit-off_t
+# targets like the Android NDK, this is what lets a >2 GiB pack pread/pwrite and
+# lseek without truncating the offset. Must be set before any system header, so
+# push it onto every TU's command line.
+add_compile_definitions(_FILE_OFFSET_BITS=64)
+
 # ---- vendored monocypher (zero external deps) -------------------------------
 add_library(monocypher STATIC third_party/monocypher/monocypher.c)
 target_include_directories(monocypher PUBLIC third_party/monocypher)
@@ -101,4 +107,12 @@ if(SEALPACK_BUILD_TESTS)
     set_target_properties(test_capi PROPERTIES LINKER_LANGUAGE CXX)
     target_link_libraries(test_capi PRIVATE sealpack monocypher)
     add_test(NAME capi COMMAND test_capi)
+
+    # End-to-end CLI smoke: drives the real `sealpack` binary (create/add/ls/cat/
+    # get/merge + .spkdel) so CLI regressions get caught, not just the library.
+    # Cross-platform via a CMake -P script (execute_process + `cmake -E env`).
+    add_test(NAME cli COMMAND ${CMAKE_COMMAND}
+        -DEXE=$<TARGET_FILE:sealpack-cli>
+        -DWORK=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_smoke.cmake)
 endif()

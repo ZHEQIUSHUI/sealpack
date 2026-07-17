@@ -1,5 +1,6 @@
-/build/
+/build*/
 *.o
 *.a
 *.so
 *.sealpack
+*.spk

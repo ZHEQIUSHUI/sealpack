@@ -280,11 +280,15 @@ The CLI binary is `build/sealpack` (target `sealpack-cli`,
   model into a terminal or an editor is the failure mode we're guarding.
 - **Web is localhost + token only.** Don't add a bind-address option that
   defaults to `0.0.0.0`, and don't render pack-controlled HTML/SVG.
-- **Pack-controlled strings are untrusted in the web UI.** File/dir names and
-  paths come from a `.spk` that may be hostile. The front-end builds every row
-  with `textContent` + `addEventListener` closures — **never** string-interpolate
-  a pack name into `innerHTML` or an inline `on*="…"` handler (that was a stored
-  XSS). `esc()` is only for our own server messages.
+- **Pack-controlled strings are untrusted — everywhere they leave the pack.** A
+  `.spk` may be hostile and `normalize_path` allows any byte except `/`/`..` (incl.
+  NUL/CR/LF/quotes). So: the web front-end builds rows with `textContent` +
+  `addEventListener` closures (never a pack name in `innerHTML` or `on*="…"` — that
+  was a stored XSS); an HTTP header value built from a pack path must be scrubbed
+  (`safe_filename()` for `Content-Disposition` — raw CR/LF/NUL there was header
+  injection); and the CLI `edit` only accepts a plain `[A-Za-z0-9._-]` extension
+  and shell-escapes the temp path (a `'` in the name was `system()` injection).
+  `esc()`/`safe_filename()` are for these sinks; never skip them.
 - **The plaintext header is parsed before authentication.** `read_header_kdf`
   validates the Argon2 params (`nb_lanes` ≥ 1, `nb_passes` ≥ 1,
   `8·nb_lanes ≤ nb_blocks ≤ 4 GiB`) — a crafted `nb_lanes=0` divided-by-zero in

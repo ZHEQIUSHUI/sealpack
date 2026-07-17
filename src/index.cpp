@@ -27,7 +27,7 @@ bool get_u64(const uint8_t* d, size_t n, size_t& p, uint64_t& v) {
     return true;
 }
 bool get_bytes(const uint8_t* d, size_t n, size_t& p, size_t len, std::string& out) {
-    if (p + len > n) return false;
+    if (len > n - p) return false;   // `p <= n` always; avoids p+len overflow on 32-bit
     out.assign(reinterpret_cast<const char*>(d) + p, len);
     p += len;
     return true;

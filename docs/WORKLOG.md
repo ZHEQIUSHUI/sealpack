@@ -6,6 +6,54 @@ reference). Commit hashes are on `ZHEQIUSHUI/sealpack`.
 
 ---
 
+## 2026-07-17 — deep review sweep: 2 security fixes + hardening, more tests + CI
+
+Ran four parallel review agents over the whole tree (core, store+os, CLI, web+capi)
+and fixed everything real they turned up. Two were genuine security bugs (threat
+model: a `.spk` can come from anyone).
+
+- **[HIGH] `edit` shell injection (POSIX).** `edit_in_editor` took the extension
+  from the in-pack path and put the temp path into a `system("$ED '…'")` string;
+  a file named `x.txt';id;'` broke out of the quoting → arbitrary command exec.
+  Fix (`platform_posix.cpp`): only accept a plain `[A-Za-z0-9._-]` extension, and
+  single-quote-escape the path. (Win32 was not vulnerable — `"`is illegal in
+  filenames and the move to that name falls back to `.tmp`.)
+- **[HIGH] Content-Disposition header injection (web `/api/get`).** The pack
+  basename went into `filename="…"` unescaped; `normalize_path` allows CR/LF/NUL/
+  `"`, and httplib's CRLF guard stops at the first NUL while the write is
+  length-based → a hostile filename could inject response headers on download.
+  Fix (`web.cpp`): `safe_filename()` scrubs control/quote chars; added
+  `X-Content-Type-Options: nosniff` to `/api/get` and `/api/view`; made the token
+  compare constant-time.
+- **[Med] `compact()` could null the store.** It `reset()` the old store before the
+  fallible rename+reopen; any I/O error there left `impl_->store == nullptr` →
+  crash on the next call. Now restores the (intact) original on rename failure.
+- **[Med] 32-bit robustness.** `get_bytes` bounds check `p+len>n` could wrap on a
+  32-bit `size_t` (crafted manifest → OOB read); rewrote as `len > n-p`. Added
+  `_FILE_OFFSET_BITS=64` so >2 GiB packs pread/pwrite correctly on 32-bit `off_t`
+  (Android). C-ABI `sealpack_entry.size` was `size_t` → made it `uint64_t`
+  (≥4 GiB files truncated on 32-bit).
+- **[Low] defense-in-depth.** `read_decrypt` now checks `enc_size == plain_size+40`
+  before decrypting (a bad manifest can't over-read the record buffer); POSIX
+  `rename_replace` fsyncs the parent dir (durability parity with Win32's
+  `MOVEFILE_WRITE_THROUGH`); `sealpack_list` guards its malloc multiply;
+  `sealpack_merge` rejects `target==source`; the C header now documents that the
+  next `list`/`stat` also invalidates a returned `const char*`. CLI polish: `merge`
+  file-count excludes `.spkdel`, `g_session_password` stays in sync after `rekey`,
+  `merge -d …` with no source errors cleanly.
+- **Tests + CI.** New **`cli` ctest** (`tests/cli_smoke.cmake`, a cross-platform
+  `cmake -P` driver) exercises the real binary end to end — create/add/ls/cat/get,
+  and a `merge` with `.spkdel` deletion — so CLI regressions are caught, not just
+  the library. `test_capi` now covers `sealpack_merge` + `.spkdel`. Added an
+  **ASan+UBSan job** to CI (Linux Debug, full ctest instrumented) to catch this
+  class of memory/UB bug going forward.
+- Agents also *confirmed correct* (so future readers don't re-audit): the commit/
+  superblock protocol, refcount/dedup invariants, the `.spkdel` parser edge cases,
+  `widen()`/OVERLAPPED positional I/O, KDF validation, the front-end stored-XSS
+  fix, rekey-requires-password, and the preview MIME safety.
+
+---
+
 ## 2026-07-16 — incremental update: a patch is just a pack you `merge`
 
 Update a shipped pack by sending only the changed files. The design went through
