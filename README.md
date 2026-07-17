@@ -32,6 +32,22 @@ one file, encrypted, deduplicated, and safe across power loss.
 | **Two APIs** | C++ `Pack` class (core) + C ABI (`sealpack.h`) wrapper for FFI |
 | **File-manager ready** | filesystem-style paths, `move`/`copy`/`list`(size+mtime)/`stat` — a UI splits paths on `/` into a folder tree |
 
+## Download
+
+Prebuilt CLI + SDK for each platform are attached to the rolling
+[**latest** release](https://github.com/ZHEQIUSHUI/sealpack/releases/tag/latest),
+rebuilt on every push to `master`:
+
+| Platform | Asset |
+|---|---|
+| Linux x64 | `sealpack-linux-x64.tar.gz` |
+| macOS arm64 | `sealpack-macos-arm64.tar.gz` |
+| Windows x64 | `sealpack-windows-x64.zip` |
+
+Each archive holds `bin/` (the `sealpack` CLI), `lib/` (`libsealpack` +
+`libmonocypher` static libs — link **both**), and `include/` (the C + C++
+headers). Or [build from source](#build--test).
+
 ## Use it
 
 **C++**
@@ -156,7 +172,7 @@ junk tails to prove it.
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-ctest --test-dir build --output-on-failure   # crypto / index / store / pack / patch / crash / capi
+ctest --test-dir build --output-on-failure   # crypto / index / store / pack / merge / crash / capi
 ```
 
 ## Platforms
