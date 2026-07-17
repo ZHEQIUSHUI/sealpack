@@ -80,5 +80,43 @@ if(lsout MATCHES "\\.spkdel")
   message(FATAL_ERROR ".spkdel control file leaked into the pack")
 endif()
 
-file(REMOVE "${PACK}" "${UPD}")
+# 4) diff two full packs: print the changes, and (with an output) write a
+#    mergeable update pack; then apply it and confirm it matches.
+set(DA "${WORK}/da.spk")
+set(DB "${WORK}/db.spk")
+set(DU "${WORK}/du.spk")
+file(REMOVE "${DA}" "${DB}" "${DU}")
+file(WRITE "${WORK}/f1.txt" "keep me\n")
+file(WRITE "${WORK}/f2.txt" "before\n")
+file(WRITE "${WORK}/f2b.txt" "after the change\n")
+file(WRITE "${WORK}/f3.txt" "a third file\n")
+run(ARGS create "${DA}" INPUT "${PWFILE}")
+run(ARGS add "${DA}" keep.txt "${WORK}/f1.txt")
+run(ARGS add "${DA}" mod.txt "${WORK}/f2.txt")
+run(ARGS add "${DA}" gone.txt "${WORK}/f3.txt")
+run(ARGS create "${DB}" INPUT "${PWFILE}")
+run(ARGS add "${DB}" keep.txt "${WORK}/f1.txt")     # unchanged
+run(ARGS add "${DB}" mod.txt "${WORK}/f2b.txt")     # modified
+run(ARGS add "${DB}" new.txt "${WORK}/f3.txt")      # added (gone.txt is dropped)
+
+# diff-only (no output path) prints the change list
+run(ARGS diff "${DA}" "${DB}" EXPECT "~ mod\\.txt")
+run(ARGS diff "${DA}" "${DB}" EXPECT "3 change")
+
+# diff → update pack, then merge it into DA and verify it becomes DB's content
+run(ARGS diff "${DA}" "${DB}" "${DU}" EXPECT "wrote")
+run(ARGS merge "${DA}" "${DU}" EXPECT "merged")
+run(ARGS cat "${DA}" mod.txt EXPECT "after the change")   # modified applied
+run(ARGS cat "${DA}" new.txt EXPECT "a third file")       # added applied
+execute_process(
+  COMMAND "${CMAKE_COMMAND}" -E env "SEALPACK_PASSWORD=pw" "${EXE}" ls "${DA}"
+  OUTPUT_VARIABLE dls)
+if(dls MATCHES "gone\\.txt")
+  message(FATAL_ERROR "diff/merge didn't delete gone.txt")
+endif()
+if(NOT dls MATCHES "keep\\.txt")
+  message(FATAL_ERROR "diff/merge dropped the unchanged keep.txt")
+endif()
+
+file(REMOVE "${PACK}" "${UPD}" "${DA}" "${DB}" "${DU}")
 message(STATUS "cli_smoke: OK")

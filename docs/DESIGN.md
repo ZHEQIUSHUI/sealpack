@@ -441,10 +441,21 @@ password** as the target and the operator types one password; different password
 work too (two prompts). No baseline/master-key lineage to preserve — updates chain
 freely because merge is plaintext-level.
 
+**Building the update pack: by hand, or `diff`.** You can just `create` + `add`
+the files you changed. Or, when you have two *full* packs (old + new), let the tool
+compute the delta: `sealpack diff <old.spk> <new.spk> [<update.spk>]` prints the
+changed files (`+` added, `~` modified, `-` deleted) and, if given an output, writes
+a mergeable update pack — the added/modified files plus a `.spkdel` of the deletions,
+under the OLD pack's password (so `merge` reuses it). Omit the output for a dry-run
+diff. It's cheap: `Pack::diff` compares the path→content-hash maps, reading no
+blobs. (This is *not* the old bespoke `.spkpatch` — the output is an ordinary,
+inspectable, mergeable `.spk`.)
+
 CLI: `merge` is a normal `do_command` verb — `merge <update.spk> [-d <path>]…` in
 the shell (against the open pack), or `sealpack merge <target> <update.spk> [-d …]`
 one-shot. It opens the source pack, and **tries the target's password on it first**
 (a patch usually shares it) so the same-password case needs no extra prompt; only
 if that fails does it prompt for the source's password (TTY) — a different-password
-source therefore needs a terminal. C ABI: `sealpack_merge(target, source)` (device
-side) — buffered, call `sealpack_commit`.
+source therefore needs a terminal. `diff` opens two packs, so it's one-shot only
+(a producer op). C ABI: `sealpack_merge(target, source)` (device side) — buffered,
+call `sealpack_commit`.

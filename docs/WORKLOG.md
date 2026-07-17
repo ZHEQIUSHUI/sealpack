@@ -6,6 +6,19 @@ reference). Commit hashes are on `ZHEQIUSHUI/sealpack`.
 
 ---
 
+## 2026-07-17 — `diff` back (as a pack-to-pack helper, not a format)
+
+Re-added `sealpack diff <old.spk> <new.spk> [<update.spk>]` — removed in the
+merge redesign, but useful when you *do* have two full packs and want the tool to
+compute the delta rather than hand-building the update pack. It prints the changes
+(`+`/`~`/`-` with sizes) and, given an output, writes a **normal mergeable `.spk`**
+(added/modified files + a `.spkdel` of deletions, under the old pack's password) —
+not the old bespoke `.spkpatch`. Omit the output for a dry-run. Backed by a cheap
+`Pack::diff` (compares path→hash maps, reads no blobs). Covered by the `cli` smoke
+test (diff-only print + diff→merge round-trip).
+
+---
+
 ## 2026-07-17 — deep review sweep: 2 security fixes + hardening, more tests + CI
 
 Ran four parallel review agents over the whole tree (core, store+os, CLI, web+capi)

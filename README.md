@@ -122,6 +122,14 @@ sealpack add update.spk .spkdel dellist.txt        # or: sealpack edit update.sp
 ```
 Or delete ad-hoc at merge time: `sealpack merge deployed.spk update.spk -d models/old.axmodel`.
 
+**Already have two full packs?** Let `diff` compute the update for you — it prints
+what changed and, given an output path, writes a mergeable update pack (changed
+files + a `.spkdel` of the deletions):
+```bash
+sealpack diff v1.spk v2.spk               # dry-run: just print + / ~ / - changes
+sealpack diff v1.spk v2.spk update.spk    # …and write the update pack to merge
+```
+
 ## On-disk format
 
 ```

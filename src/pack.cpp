@@ -403,6 +403,21 @@ bool Pack::merge(const Pack& other) {
     return true;
 }
 
+void Pack::diff(const Pack& newer, std::vector<std::string>* added,
+                std::vector<std::string>* modified, std::vector<std::string>* deleted) const {
+    // Logical delta THIS (old) → newer, by comparing the path→content-hash maps.
+    // Cheap: no blobs are read. Outputs are path-sorted (index.paths is a std::map).
+    const auto& op = impl_->index.paths;
+    const auto& np = newer.impl_->index.paths;
+    for (const auto& kv : np) {
+        auto it = op.find(kv.first);
+        if (it == op.end()) { if (added) added->push_back(kv.first); }
+        else if (it->second.hash != kv.second.hash) { if (modified) modified->push_back(kv.first); }
+    }
+    for (const auto& kv : op)
+        if (deleted && np.find(kv.first) == np.end()) deleted->push_back(kv.first);
+}
+
 int Pack::last_error() const { return impl_->last_err; }
 
 }  // namespace sealpack

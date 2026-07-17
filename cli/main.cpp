@@ -312,7 +312,7 @@ static int shell(Pack* pk, const std::string& pack_path) {
 
 static bool is_command(const std::string& s) {
     static const char* k[] = {"create","add","get","cat","edit","ls","rm","mv","cp","stat",
-                              "compact","merge","rekey","web"};
+                              "compact","merge","diff","rekey","web"};
     for (auto c : k) if (s == c) return true;
     return false;
 }
@@ -326,6 +326,8 @@ static int usage() {
         "                                stat/compact; or  web <pack> [port]\n"
         "  sealpack merge <pack> <update.spk> [-d <path>]...   apply an incremental\n"
         "                                update (overlay another pack's files)\n"
+        "  sealpack diff  <old.spk> <new.spk> [<update.spk>]   print changed files;\n"
+        "                                with an output, write a mergeable update pack\n"
         "  one-shot prompts for the password on a terminal, else uses $SEALPACK_PASSWORD\n");
     return 2;
 }
@@ -359,6 +361,63 @@ int main(int argc, char** argv) {
         if (p1 != p2) { std::fprintf(stderr, "passwords don't match\n"); return 1; }
         auto pk = Pack::create(pack, p1);
         if (!pk || !pk->commit()) { std::fprintf(stderr, "create failed (already exists?)\n"); return 1; }
+        return 0;
+    }
+
+    // diff opens TWO packs (old + new). It prints the changed files and, if an
+    // output path is given, writes a mergeable update pack (changed files + a
+    // .spkdel of the deletions). Omit the output to just print the diff.
+    if (cmd == "diff") {
+        if (argc < 4) {
+            std::fprintf(stderr, "usage: sealpack diff <old.spk> <new.spk> [<update.spk>]\n"); return 2;
+        }
+        std::string pw_old, pw_new;
+        if (sealpack_cli::stdin_is_tty()) {
+            pw_old = read_password("password for old pack: ");
+            pw_new = read_password("password for new pack: ");
+        } else {
+            const char* e = ::getenv("SEALPACK_PASSWORD");
+            if (!e) { std::fprintf(stderr, "no terminal: set $SEALPACK_PASSWORD (and $SEALPACK_PASSWORD_NEW if the new pack differs)\n"); return 2; }
+            const char* e2 = ::getenv("SEALPACK_PASSWORD_NEW");
+            pw_old = e; pw_new = (e2 && *e2) ? e2 : e;
+        }
+        auto oldpk = Pack::open(argv[2], pw_old);
+        if (!oldpk) { std::fprintf(stderr, "open %s failed (wrong password or missing)\n", argv[2]); return 1; }
+        auto newpk = Pack::open(argv[3], pw_new);
+        if (!newpk) { std::fprintf(stderr, "open %s failed (wrong password or missing)\n", argv[3]); return 1; }
+
+        std::vector<std::string> added, modified, deleted;
+        oldpk->diff(*newpk, &added, &modified, &deleted);
+
+        auto sz = [](Pack* p, const std::string& path) -> std::string {
+            Pack::Entry e; return p->stat(path, &e) ? human_size(e.size) : std::string("?");
+        };
+        for (const auto& p : added)    std::printf("+ %s  (%s)\n", p.c_str(), sz(newpk.get(), p).c_str());
+        for (const auto& p : modified) std::printf("~ %s  (%s -> %s)\n", p.c_str(),
+                                                   sz(oldpk.get(), p).c_str(), sz(newpk.get(), p).c_str());
+        for (const auto& p : deleted)  std::printf("- %s\n", p.c_str());
+        std::fprintf(stderr, "%zu change(s): %zu added, %zu modified, %zu deleted\n",
+                     added.size() + modified.size() + deleted.size(),
+                     added.size(), modified.size(), deleted.size());
+
+        if (argc < 5) return 0;   // no output path → diff-only
+        const char* outp = argv[4];
+        std::remove(outp);        // overwrite an existing update pack
+        auto up = Pack::create(outp, pw_old);   // update pack shares the OLD (=deployed) password
+        if (!up) { std::fprintf(stderr, "create %s failed\n", outp); return 1; }
+        std::vector<std::string> changed = added;                 // added + modified: ship their content
+        changed.insert(changed.end(), modified.begin(), modified.end());
+        for (const auto& p : changed) {
+            std::string data;
+            if (!newpk->get(p, &data) || !up->put(p, data)) { std::fprintf(stderr, "diff: copying %s failed\n", p.c_str()); return 1; }
+        }
+        if (!deleted.empty()) {
+            std::string dl;
+            for (const auto& p : deleted) { dl += p; dl += '\n'; }
+            if (!up->put(".spkdel", dl)) { std::fprintf(stderr, "diff: writing .spkdel failed\n"); return 1; }
+        }
+        if (!up->commit()) { std::fprintf(stderr, "diff: commit failed\n"); return 1; }
+        std::fprintf(stderr, "wrote %s (merge it into a deployed pack)\n", outp);
         return 0;
     }
 

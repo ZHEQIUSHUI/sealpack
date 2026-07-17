@@ -72,6 +72,16 @@ public:
     // consumed, not merged). So an update pack fully describes its update.
     bool merge(const Pack& other);
 
+    // Logical delta from THIS pack (old) to `newer`: fills the paths that were
+    // added (in newer only), modified (in both, different content), and deleted
+    // (in this only). Cheap — compares content hashes, reads no blobs. Producer
+    // helper for building an update pack (put the added+modified files + a
+    // `.spkdel` of the deleted ones); the device just merge()s that pack.
+    void diff(const Pack& newer,
+              std::vector<std::string>* added,
+              std::vector<std::string>* modified,
+              std::vector<std::string>* deleted) const;
+
     // ---- password: change it without re-encrypting the data ----
     // Data is under a random master key; the password only wraps that key into
     // an 88-byte slot, so rekey rewrites that slot alone — the blobs never move,
