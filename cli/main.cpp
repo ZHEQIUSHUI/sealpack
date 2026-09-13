@@ -356,8 +356,14 @@ int main(int argc, char** argv) {
     const char* pack = argv[2];
 
     if (cmd == "create") {
-        const std::string p1 = read_password("new password: ");
-        const std::string p2 = read_password("confirm password: ");
+        std::string p1, p2;
+        if (sealpack_cli::stdin_is_tty()) {
+            p1 = read_password("new password: ");
+            p2 = read_password("confirm password: ");
+        } else {
+            if (!batch_password(&p1)) return 2;   // CI: $SEALPACK_PASSWORD, no confirm prompt
+            p2 = p1;
+        }
         if (p1 != p2) { std::fprintf(stderr, "passwords don't match\n"); return 1; }
         auto pk = Pack::create(pack, p1);
         if (!pk || !pk->commit()) { std::fprintf(stderr, "create failed (already exists?)\n"); return 1; }
