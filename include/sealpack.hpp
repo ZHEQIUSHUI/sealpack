@@ -90,6 +90,19 @@ public:
     bool verify_password(const std::string& password) const;  // does `password` open this pack?
     bool rekey(const std::string& new_password);              // change the password
 
+    // ---- more than one key for a pack ----
+    // The data is under a random master key and the file has 8 key slots.
+    // Another password (a recovery code, say) takes a free slot and opens the
+    // pack like the first. A recipient slot wraps the master key for an X25519
+    // public key: no password opens it, only open_with_key with the secret key.
+    bool add_password(const std::string& password);
+    bool add_recipient(const uint8_t public_key[32]);
+    static std::unique_ptr<Pack> open_with_key(const std::string& path, const uint8_t secret_key[32]);
+    int key_count() const;       // slots in use
+    bool has_recipient() const;  // one of them is a recipient slot
+    static bool new_keypair(uint8_t secret_key[32], uint8_t public_key[32]);
+    static void public_key_of(const uint8_t secret_key[32], uint8_t public_key[32]);
+
     int last_error() const;  // sealpack_status code of the last failing call
 
 private:

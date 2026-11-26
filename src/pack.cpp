@@ -99,9 +99,10 @@ bool wrap_master(KeySlot* slot, const uint8_t master[kKeyBytes],
 
 // Recover `master` from a slot using `password`. false = empty slot or wrong
 // password (AEAD auth fails — the "no password, no plaintext" guarantee).
+bool is_public_slot(const KeySlot& slot);
 bool unwrap_master(uint8_t master[kKeyBytes], const KeySlot& slot,
                    const std::string& password, const KdfParams& kdf) {
-    if (slot.empty()) return false;
+    if (slot.empty() || is_public_slot(slot)) return false;
     uint8_t kek[kKeyBytes];
     if (derive_key(kek, password.c_str(), slot.salt, kdf) != 0) { wipe(kek, kKeyBytes); return false; }
     const uint8_t* nonce  = slot.wrapped;
@@ -109,6 +110,65 @@ bool unwrap_master(uint8_t master[kKeyBytes], const KeySlot& slot,
     const uint8_t* cipher = slot.wrapped + kNonceBytes + kMacBytes;
     int rc = aead_decrypt(master, mac, kek, nonce, nullptr, 0, cipher, kKeyBytes);
     wipe(kek, kKeyBytes);
+    return rc == 0;
+}
+
+// ---- a key slot that a public key wraps ----
+// The 88 bytes of the slot: marker(8) | ephemeral public key(32) | mac(16) |
+// cipher(32). The key is BLAKE2b(shared secret | ephemeral public | recipient
+// public), used once (a fresh ephemeral key each time), so the nonce is zero.
+// No password opens such a slot; the recipient's secret key does.
+const uint8_t kPublicSlotMark[8] = {'S', 'P', 'P', 'U', 'B', 'K', 0x01, 0xA7};
+
+bool is_public_slot(const KeySlot& slot) { return std::memcmp(slot.salt, kPublicSlotMark, 8) == 0; }
+
+void public_slot_key(uint8_t key[kKeyBytes], const uint8_t shared[kKeyBytes], const uint8_t eph_pub[kKeyBytes],
+                     const uint8_t recipient_pub[kKeyBytes]) {
+    uint8_t buf[3 * kKeyBytes];
+    std::memcpy(buf, shared, kKeyBytes);
+    std::memcpy(buf + kKeyBytes, eph_pub, kKeyBytes);
+    std::memcpy(buf + 2 * kKeyBytes, recipient_pub, kKeyBytes);
+    content_hash(key, buf, sizeof buf);
+    wipe(buf, sizeof buf);
+}
+
+// The slot as one run of bytes after the marker (salt and wrapped are adjacent fields, but not relied on).
+void slot_bytes_out(const KeySlot& slot, uint8_t out[kSaltBytes + kWrappedBytes]) {
+    std::memcpy(out, slot.salt, kSaltBytes);
+    std::memcpy(out + kSaltBytes, slot.wrapped, kWrappedBytes);
+}
+void slot_bytes_in(KeySlot* slot, const uint8_t in[kSaltBytes + kWrappedBytes]) {
+    std::memcpy(slot->salt, in, kSaltBytes);
+    std::memcpy(slot->wrapped, in + kSaltBytes, kWrappedBytes);
+}
+
+bool wrap_master_public(KeySlot* slot, const uint8_t master[kKeyBytes], const uint8_t recipient_pub[kKeyBytes]) {
+    uint8_t eph_sk[kKeyBytes], eph_pub[kKeyBytes], shared[kKeyBytes], key[kKeyBytes];
+    if (random_bytes(eph_sk, kKeyBytes) != 0) return false;
+    x25519_public(eph_pub, eph_sk);
+    x25519_shared(shared, eph_sk, recipient_pub);
+    public_slot_key(key, shared, eph_pub, recipient_pub);
+    uint8_t raw[kSaltBytes + kWrappedBytes] = {0};
+    const uint8_t nonce[kNonceBytes] = {0};
+    std::memcpy(raw, kPublicSlotMark, 8);
+    std::memcpy(raw + 8, eph_pub, kKeyBytes);
+    aead_encrypt(raw + 8 + kKeyBytes + kMacBytes, raw + 8 + kKeyBytes, key, nonce, nullptr, 0, master, kKeyBytes);
+    slot_bytes_in(slot, raw);
+    wipe(eph_sk, kKeyBytes); wipe(shared, kKeyBytes); wipe(key, kKeyBytes);
+    return true;
+}
+
+bool unwrap_master_public(uint8_t master[kKeyBytes], const KeySlot& slot, const uint8_t secret_key[kKeyBytes]) {
+    if (!is_public_slot(slot)) return false;
+    uint8_t raw[kSaltBytes + kWrappedBytes];
+    slot_bytes_out(slot, raw);
+    uint8_t my_pub[kKeyBytes], shared[kKeyBytes], key[kKeyBytes];
+    x25519_public(my_pub, secret_key);
+    x25519_shared(shared, secret_key, raw + 8);
+    public_slot_key(key, shared, raw + 8, my_pub);
+    const uint8_t nonce[kNonceBytes] = {0};
+    const int rc = aead_decrypt(master, raw + 8 + kKeyBytes, key, nonce, nullptr, 0, raw + 8 + kKeyBytes + kMacBytes, kKeyBytes);
+    wipe(shared, kKeyBytes); wipe(key, kKeyBytes);
     return rc == 0;
 }
 
@@ -131,6 +191,9 @@ std::unique_ptr<Pack> Pack::create(const std::string& path, const std::string& p
     uint8_t master[kKeyBytes];
     if (random_bytes(master, kKeyBytes) != 0) return nullptr;  // random master key
     KdfParams kdf;
+    // An empty password protects nothing (the salt is public), so a
+    // memory-hard derivation only costs time on every open: the smallest one.
+    if (password.empty()) { kdf.nb_blocks = 8; kdf.nb_passes = 1; kdf.nb_lanes = 1; }
     KeySlot slot0;
     if (!wrap_master(&slot0, master, password, kdf)) { wipe(master, kKeyBytes); return nullptr; }
 
@@ -171,6 +234,78 @@ std::unique_ptr<Pack> Pack::open(const std::string& path, const std::string& pas
     pk->impl_->index = std::move(idx);
     return pk;
 }
+
+// ---- more than one key for a pack ----
+
+std::unique_ptr<Pack> Pack::open_with_key(const std::string& path, const uint8_t secret_key[32]) {
+    KdfParams kdf;
+    KeySlot slots[kNumKeySlots];
+    if (!Store::read_meta(path, &kdf, slots)) return nullptr;
+    uint8_t master[kKeyBytes];
+    int opened = -1;
+    for (int i = 0; i < kNumKeySlots; ++i)
+        if (unwrap_master_public(master, slots[i], secret_key)) { opened = i; break; }
+    if (opened < 0) { wipe(master, kKeyBytes); return nullptr; }
+    auto store = Store::open(path, master);
+    Index idx;
+    if (!store || !load_manifest(*store, master, &idx)) { wipe(master, kKeyBytes); return nullptr; }
+    std::unique_ptr<Pack> pk(new Pack);
+    pk->impl_->path = path;
+    pk->impl_->store = std::move(store);
+    std::memcpy(pk->impl_->key, master, kKeyBytes);
+    pk->impl_->opened_slot = opened;
+    wipe(master, kKeyBytes);
+    pk->impl_->index = std::move(idx);
+    return pk;
+}
+
+static int free_slot(const Store& store) {
+    for (int i = 0; i < kNumKeySlots; ++i)
+        if (store.slot(i).empty()) return i;
+    return -1;
+}
+
+bool Pack::add_password(const std::string& password) {
+    Impl& im = *impl_;
+    const int i = free_slot(*im.store);
+    KeySlot slot;
+    if (i < 0 || !wrap_master(&slot, im.key, password, im.store->kdf()) || !im.store->write_slot(i, slot)) {
+        im.last_err = SEALPACK_ERR_IO; return false;
+    }
+    im.last_err = SEALPACK_OK;
+    return true;
+}
+
+bool Pack::add_recipient(const uint8_t public_key[32]) {
+    Impl& im = *impl_;
+    const int i = free_slot(*im.store);
+    KeySlot slot;
+    if (i < 0 || !wrap_master_public(&slot, im.key, public_key) || !im.store->write_slot(i, slot)) {
+        im.last_err = SEALPACK_ERR_IO; return false;
+    }
+    im.last_err = SEALPACK_OK;
+    return true;
+}
+
+int Pack::key_count() const {
+    int n = 0;
+    for (int i = 0; i < kNumKeySlots; ++i) n += impl_->store->slot(i).empty() ? 0 : 1;
+    return n;
+}
+
+bool Pack::has_recipient() const {
+    for (int i = 0; i < kNumKeySlots; ++i)
+        if (is_public_slot(impl_->store->slot(i))) return true;
+    return false;
+}
+
+bool Pack::new_keypair(uint8_t secret_key[32], uint8_t public_key[32]) {
+    if (random_bytes(secret_key, kKeyBytes) != 0) return false;
+    x25519_public(public_key, secret_key);
+    return true;
+}
+
+void Pack::public_key_of(const uint8_t secret_key[32], uint8_t public_key[32]) { x25519_public(public_key, secret_key); }
 
 bool Pack::put(const std::string& path, const void* data, size_t size) {
     Impl& im = *impl_;

@@ -50,6 +50,12 @@ void content_hash(uint8_t hash[kHashBytes], const uint8_t* data, size_t n);
 // Returns 0 ok, -1 fail. This is NOT a home-grown RNG.
 int random_bytes(uint8_t* buf, size_t n);
 
+// X25519, for a key slot that a public key wraps (only the holder
+// of the secret key unwraps it). `x25519_shared` is the raw shared secret:
+// hash it (with both public keys) before use as a key.
+void x25519_public(uint8_t public_key[kKeyBytes], const uint8_t secret_key[kKeyBytes]);
+void x25519_shared(uint8_t shared[kKeyBytes], const uint8_t secret_key[kKeyBytes], const uint8_t their_public[kKeyBytes]);
+
 // Constant-time equality (1 = equal, 0 = not) — no early-out, no timing leak.
 int ct_equal(const uint8_t* a, const uint8_t* b, size_t n);
 

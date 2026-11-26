@@ -120,8 +120,30 @@ never changes; the password only protects the *wrapped copy* of it.
 3. `AEAD_wrap(master_key)` under the new KEK → write the single 88-byte slot 0
    (one `pwrite` + `fsync`). **The data region is never touched** → instant.
 
+`rekey` rewrites the slot the pack was opened with; the other slots stay.
+
+**More than one key.** The header has 8 slots and the data never depends on
+which one unwrapped the master key, so a pack can be opened in several ways:
+
+- `add_password(pw)` wraps the master key under another password in a free slot
+  (a recovery code, a second user). It opens the pack like the first.
+- `add_recipient(public_key)` wraps it for an X25519 public key: a fresh
+  ephemeral key pair, `KEK = BLAKE2b(shared | ephemeral_public | recipient_public)`,
+  and the slot holds `marker(8) | ephemeral_public(32) | mac(16) | wrapped(32)`.
+  No password opens such a slot (password unwrapping skips it); only
+  `open_with_key(path, secret_key)` does. Whoever writes the pack needs the
+  public key only — the secret key can stay offline (key escrow / vendor recovery).
+- `new_keypair`, `public_key_of`, `key_count`, `has_recipient` complete the API.
+  The file format is unchanged: old readers open such a pack with its passwords.
+
+The KDF parameters are pack-wide, so every password slot costs the same to try.
+
 `verify_password` just attempts an unwrap. Empty password is allowed (wraps under
-a KEK derived from ""), which means *no protection* — the CLI/web warn about it.
+a KEK derived from ""), which means *no protection* — the CLI/web warn about it. A pack
+created with an empty password uses the minimum Argon2 cost: the salt is public,
+so a memory-hard derivation would only slow every open down.
+`Store::open` falls back to read-only when the file cannot be opened for writing
+(write-protected file, read-only media): reads work, writes fail.
 
 ---
 

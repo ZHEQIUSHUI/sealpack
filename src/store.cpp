@@ -163,6 +163,8 @@ bool Store::read_meta(const std::string& path, KdfParams* kdf, KeySlot slots[kNu
 
 std::unique_ptr<Store> Store::open(const std::string& path, const uint8_t master[kKeyBytes]) {
     os::handle_t fd = os::open_file(path.c_str(), os::OpenMode::ReadWrite);
+    // A write-protected file (or read-only media) can still be read; writes then fail.
+    if (!os::valid(fd)) fd = os::open_file(path.c_str(), os::OpenMode::ReadOnly);
     if (!os::valid(fd)) return nullptr;
     KdfParams kdf;
     if (!read_header_kdf(fd, &kdf)) { os::close_file(fd); return nullptr; }

@@ -26,6 +26,7 @@ one file, encrypted, deduplicated, and safe across power loss.
 | **Single file** | header + append-only blobs + manifest + dual superblock |
 | **Encrypted** | random master key + XChaCha20-Poly1305; the password wraps the master key via Argon2id. No password, no plaintext; no backdoor, no recovery key |
 | **Change password** | `rekey` re-wraps the master key under a new password — one 88B slot rewritten, the data blobs never move, so it's instant on a multi-GB pack |
+| **Several keys** | Up to 8 key slots per pack: `add_password` adds another password (a recovery code, a second user); `add_recipient` wraps the key for an X25519 public key so that only the holder of the secret key opens it (`open_with_key`) — escrow / vendor recovery without any secret in the writing program. C++ API; format unchanged |
 | **Deduplicated** | content-addressed (BLAKE2b): identical bytes stored once; `move`/`copy` are O(1) |
 | **Crash-safe** | append-only + atomic double-superblock commit — a power loss leaves the old state or the new one, never half-written |
 | **Incremental update** | a "patch" is just a small pack of the changed files; `merge` overlays it onto a deployed pack in place — ship a delta, not a multi-GB re-push. Base-independent and idempotent; deletions ride along in a `.spkdel` list |

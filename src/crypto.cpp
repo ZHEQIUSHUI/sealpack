@@ -109,4 +109,12 @@ int ct_equal(const uint8_t* a, const uint8_t* b, size_t n) {
 
 void wipe(void* p, size_t n) { crypto_wipe(p, n); }
 
+void x25519_public(uint8_t public_key[kKeyBytes], const uint8_t secret_key[kKeyBytes]) {
+    crypto_x25519_public_key(public_key, secret_key);
+}
+
+void x25519_shared(uint8_t shared[kKeyBytes], const uint8_t secret_key[kKeyBytes], const uint8_t their_public[kKeyBytes]) {
+    crypto_x25519(shared, secret_key, their_public);
+}
+
 }  // namespace sealpack
